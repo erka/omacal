@@ -622,6 +622,7 @@ type StubSettings = {
   minSyncIntervalMs: number;
   listMode: boolean;
   showDate: boolean;
+  menubarDayView?: boolean;
   menubarLabel?: boolean;
   menubarJoinMinutes?: number;
   menubarEarlier?: 'folded' | 'off';
@@ -1047,7 +1048,7 @@ export function installTauriStub(scenario: string): Harness {
         settings = saveSettings({ ...settings, listMode: args.on as boolean });
         return { ...settings };
       case 'set_menubar_preferences':
-        settings = saveSettings({ ...settings,
+        settings = saveSettings({ ...settings, menubarDayView: args.dayView as boolean,
           menubarLabel: args.label as boolean, menubarJoinMinutes: args.joinMinutes as number });
         return heldMenubar(cmd, settings);
       case 'set_menubar_sections':
