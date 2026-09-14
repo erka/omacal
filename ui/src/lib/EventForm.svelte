@@ -6,6 +6,7 @@
   import { secondZone } from './secondzone.svelte';
   import { displayClock, parseClock, zoneAbbrev, zoneClock } from './timefmt';
   import { knownGuests, type KnownGuest } from './people';
+  import { searchPlaces, type PlaceHit } from './places';
   import { escapeCloses } from './dismiss.svelte';
   import { placePopover, type Rect } from './position';
   import { REMINDER_UNITS, reminderAmountOf, reminderMax, reminderUnitOf } from './reminders';
@@ -283,6 +284,53 @@
     hi = -1;
     error = null;
     invalidField = null;
+  }
+
+  // --- Location autocomplete (recent places, then Photon) -----------------
+  //
+  // Same clothes as guests: listbox, arrows, Escape dismisses the list not
+  // the form, Enter applies a highlighted or sole match and never Saves.
+  // Search is debounced and generation-counted because Photon is a network
+  // hop on the Rust side; guests are a local SELECT and need neither.
+  let locHits = $state<PlaceHit[]>([]);
+  let locDismissed = $state(false);
+  let locHi = $state(-1);
+  let locGen = 0;
+  let locTimer: ReturnType<typeof setTimeout> | undefined;
+
+  $effect(() => {
+    const q = (value.location ?? '').trim();
+    const dismissed = locDismissed;
+    if (locTimer) {
+      clearTimeout(locTimer);
+      locTimer = undefined;
+    }
+    if (dismissed || q.length < 2) {
+      locHits = [];
+      return;
+    }
+    const gen = ++locGen;
+    locTimer = setTimeout(() => {
+      searchPlaces(q)
+        .then((hits) => {
+          if (gen !== locGen) return;
+          locHits = hits.some((h) => h.label === q) ? [] : hits;
+        })
+        .catch(() => {
+          if (gen !== locGen) return;
+          locHits = [];
+        });
+    }, 300);
+    return () => {
+      if (locTimer) clearTimeout(locTimer);
+    };
+  });
+
+  function pickPlace(h: PlaceHit) {
+    value.location = h.label;
+    locDismissed = true;
+    locHi = -1;
+    locHits = [];
   }
 
   /** One row rewritten from its two controls. A number the input cannot parse
@@ -739,9 +787,55 @@
     </div>
 
     <div class="card">
-    <label class="field">
+    <label class="field addplace">
       <span class="lab">Location</span>
-      <input bind:value={value.location} placeholder="Add a location" />
+      <input
+        bind:value={value.location}
+        placeholder="Add a location"
+        oninput={() => {
+          locDismissed = false;
+          locHi = -1;
+        }}
+        onkeydown={(e) => {
+          if (e.key === 'ArrowDown' && locHits.length > 0) {
+            e.preventDefault();
+            locHi = (locHi + 1) % locHits.length;
+            return;
+          }
+          if (e.key === 'ArrowUp' && locHits.length > 0) {
+            e.preventDefault();
+            locHi = (locHi - 1 + locHits.length) % locHits.length;
+            return;
+          }
+          if (e.key === 'Escape' && locHits.length > 0) {
+            e.stopPropagation();
+            locDismissed = true;
+            locHi = -1;
+            locHits = [];
+            return;
+          }
+          if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+            e.preventDefault();
+            const typed = (value.location ?? '').trim();
+            const picked = locHi >= 0
+              ? locHits[locHi]
+              : locHits.length === 1 && locHits[0].label !== typed
+                ? locHits[0]
+                : undefined;
+            if (picked) pickPlace(picked);
+          }
+        }}
+      />
+      {#if locHits.length > 0}
+        <div class="lsuggest" role="listbox" aria-label="Places">
+          {#each locHits as h, i (h.label)}
+            <button type="button" role="option" aria-selected={i === locHi}
+                    class:hi={i === locHi} onclick={() => pickPlace(h)}>
+              {h.label}
+            </button>
+          {/each}
+        </div>
+      {/if}
     </label>
 
     <div class="field video" role="group" aria-label="Video call">
@@ -1290,6 +1384,16 @@
     background: color-mix(in srgb, var(--text) 7%, transparent); }
   .gsuggest b { font-weight: 600; }
   .gsuggest .gmail { color: var(--muted); margin-left: 4px; }
+  .addplace { position: relative; }
+  .lsuggest { position: absolute; top: calc(100% + 2px); left: 0; right: 0;
+              z-index: 5; display: flex; flex-direction: column; gap: 1px;
+              padding: 3px; border: 1px solid var(--hairline); border-radius: 6px;
+              background: var(--surface); box-shadow: 0 8px 24px rgba(0, 0, 0, .35); }
+  .lsuggest button { font: inherit; font-size: 12px; color: var(--text); cursor: pointer;
+                     background: none; border: 0; border-radius: 4px;
+                     padding: 4px 8px; text-align: left; }
+  .lsuggest button:hover, .lsuggest button.hi {
+    background: color-mix(in srgb, var(--text) 7%, transparent); }
   .addguest button { flex: none; font: inherit; font-size: 11px; cursor: pointer;
                      border-radius: 5px; padding: 4px 10px;
                      border: 1px solid var(--hairline); background: none; color: var(--muted); }

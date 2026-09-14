@@ -4320,6 +4320,55 @@ test.describe('EventForm', () => {
     await expect(page.locator('[data-guest="eva.m@x3me.net"]')).toHaveCount(0);
   });
 
+  const BANBURY =
+    'Banbury Golf Course, 2626 South Marypost Place, Eagle, Idaho 83616, United States';
+
+  test('typing a place fragment offers Photon-shaped hits, and a click fills the address', async ({ page }) => {
+    await open(page, 'create');
+    await page.getByLabel('Location').fill('Ba');
+    const list = page.getByRole('listbox', { name: 'Places' });
+    await expect(list).toBeVisible();
+    await list.getByRole('option', { name: BANBURY }).click();
+    await expect(page.getByLabel('Location')).toHaveValue(BANBURY);
+    await expect(list).toHaveCount(0);
+  });
+
+  test('ArrowDown and Enter fill the highlighted place, and do not save', async ({ page }) => {
+    await open(page, 'create');
+    const input = page.getByLabel('Location');
+    await input.fill('Ba');
+    const list = page.getByRole('listbox', { name: 'Places' });
+    await expect(list).toBeVisible();
+    await input.press('ArrowDown');
+    await input.press('Enter');
+    await expect(input).toHaveValue(BANBURY);
+    expect(await saves(page)).toEqual([]);
+    await expect(page.locator('.pop')).toBeVisible();
+  });
+
+  test('Escape closes the place list and leaves the fragment; the form stays open', async ({ page }) => {
+    await open(page, 'create');
+    const input = page.getByLabel('Location');
+    await input.fill('Ba');
+    const list = page.getByRole('listbox', { name: 'Places' });
+    await expect(list).toBeVisible();
+    await input.press('Escape');
+    await expect(list).toHaveCount(0);
+    await expect(input).toHaveValue('Ba');
+    await expect(page.locator('.pop')).toBeVisible();
+  });
+
+  test('a query with no hits shows no list; the typed text remains; Create still works', async ({ page }) => {
+    await open(page, 'create');
+    const input = page.getByLabel('Location');
+    await input.fill('zzzznowhere');
+    await expect(page.getByRole('listbox', { name: 'Places' })).toHaveCount(0);
+    await expect(input).toHaveValue('zzzznowhere');
+    await page.getByRole('button', { name: 'Create' }).click();
+    const [saved] = await saves(page);
+    expect(saved.fields.location).toBe('zzzznowhere');
+  });
+
   /** The time fields speak the app's clock, not the engine's: they are
    *  text now (the native input rendered the system locale's AM/PM over a
    *  24h grid), rendered through `displayClock` and parsed through
