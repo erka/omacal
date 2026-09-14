@@ -21,6 +21,40 @@ pub(crate) fn may_fetch_photon(demo: bool) -> bool {
     !demo
 }
 
+/// Two characters before anything shows — one letter matches half a city
+/// and reads as noise, the same floor as the guest field.
+pub(crate) fn query_is_searchable(q: &str) -> bool {
+    q.trim().chars().count() >= 2
+}
+
+/// History first (substring match on `label`), then remote hits whose
+/// labels are not already in that list. Remote is assumed already
+/// query-relevant. Cap at `limit`.
+pub(crate) fn merge_places(
+    query: &str,
+    history: &[PlaceHit],
+    remote: &[PlaceHit],
+    limit: usize,
+) -> Vec<PlaceHit> {
+    let q = query.trim().to_ascii_lowercase();
+    let mut out: Vec<PlaceHit> = history
+        .iter()
+        .filter(|h| h.label.to_ascii_lowercase().contains(&q))
+        .cloned()
+        .collect();
+    for hit in remote {
+        if out.len() >= limit {
+            break;
+        }
+        let already = out.iter().any(|h| h.label.eq_ignore_ascii_case(&hit.label));
+        if !already {
+            out.push(hit.clone());
+        }
+    }
+    out.truncate(limit);
+    out
+}
+
 /// Photon GeoJSON → place rows. Garbage and an empty FeatureCollection are
 /// `Ok([])`, never an invented address: a lookup miss is a blank list, not a
 /// guess the form would then save.
@@ -139,5 +173,43 @@ mod tests {
     fn may_fetch_photon_is_off_in_demo() {
         assert!(may_fetch_photon(false));
         assert!(!may_fetch_photon(true));
+    }
+
+    fn hit(source: &'static str, label: &str) -> PlaceHit {
+        PlaceHit { label: label.to_string(), lat: None, lon: None, source }
+    }
+
+    #[test]
+    fn history_matches_come_first_and_photon_does_not_duplicate_them() {
+        let history = vec![hit("history", "Room 4A, Sofia, Bulgaria")];
+        let remote = vec![
+            hit("search", "Room 4A, Sofia, Bulgaria"),
+            hit(
+                "search",
+                "Banbury Golf Course, 2626 South Marypost Place, Eagle, Idaho 83616, United States",
+            ),
+        ];
+        let merged = merge_places("room", &history, &remote, 8);
+        assert_eq!(merged[0].source, "history");
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn short_queries_do_not_search() {
+        assert!(!query_is_searchable("B"));
+        assert!(query_is_searchable("Ba"));
+    }
+
+    #[test]
+    fn merge_caps_at_limit() {
+        let history: Vec<PlaceHit> = (0..10)
+            .map(|i| hit("history", &format!("History {i} Place")))
+            .collect();
+        let remote: Vec<PlaceHit> = (0..10)
+            .map(|i| hit("search", &format!("Search {i} Place")))
+            .collect();
+        let merged = merge_places("place", &history, &remote, 8);
+        assert_eq!(merged.len(), 8);
+        assert!(merged.iter().all(|h| h.source == "history"));
     }
 }
