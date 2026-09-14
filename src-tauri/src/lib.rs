@@ -14,6 +14,7 @@ mod errors;
 mod events;
 mod export;
 mod fixtures;
+mod geocode;
 /// Test-only: the golden-file mechanism the UI fixtures read. Gated so nothing
 /// that reads or writes `ui/tests/` is compiled into the shipped app.
 #[cfg(test)]
