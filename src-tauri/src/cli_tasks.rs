@@ -169,21 +169,11 @@ pub(crate) async fn execute(pool: &sqlx::SqlitePool, cmd: &TaskCmd, json: bool) 
                 Ok(v) => v,
                 Err(m) => return refuse(&m),
             };
-            (
-                serde_json::json!({
-                    "kind": "tasks-create",
-                    "calendarId": list,
-                    "summary": summary,
-                    "dueMs": due_ms,
-                    "dueAllDay": all_day,
-                }),
-                "Added",
-            )
+            (create_request(*list, summary, due_ms, all_day), "Added")
         }
-        TaskCmd::Complete { id, done } => (
-            serde_json::json!({ "kind": "tasks-complete", "id": id, "done": done }),
-            if *done { "Completed" } else { "Reopened" },
-        ),
+        TaskCmd::Complete { id, done } => {
+            (complete_request(*id, *done), if *done { "Completed" } else { "Reopened" })
+        }
         TaskCmd::Edit { id, title, due, at, notes } => {
             let task = match omacal_store::task_by_id(pool, *id).await {
                 Ok(Some(t)) => t,
@@ -206,21 +196,61 @@ pub(crate) async fn execute(pool: &sqlx::SqlitePool, cmd: &TaskCmd, json: bool) 
                 Ok(v) => v,
                 Err(m) => return refuse(&m),
             };
-            (
-                serde_json::json!({
-                    "kind": "tasks-update",
-                    "id": id,
-                    "summary": summary,
-                    "dueMs": due_ms,
-                    "dueAllDay": all_day,
-                    "notes": notes,
-                }),
-                "Saved",
-            )
+            (update_request(*id, &summary, due_ms, all_day, notes.as_deref()), "Saved")
         }
     };
 
     crate::cli_write::send(&request, json, done_word)
+}
+
+/// The three requests above, in the envelope every socket write speaks —
+/// `crate::ipc::Request`'s own shape (`v` + `cmd`, snake_case fields), the
+/// same one `cli_write.rs` builds for the events side. These used to carry
+/// `kind` and camelCase field names instead, a leftover of the webview's own
+/// vocabulary that the socket never spoke: every `omacal tasks add/edit`
+/// refused with "the request names no protocol version", silently, since
+/// the feature shipped.
+pub(crate) fn create_request(
+    list: Option<i64>,
+    summary: &str,
+    due_ms: Option<i64>,
+    due_all_day: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "v": crate::ipc::PROTOCOL_VERSION,
+        "cmd": "tasks-create",
+        "calendar_id": list,
+        "summary": summary,
+        "due_ms": due_ms,
+        "due_all_day": due_all_day,
+    })
+}
+
+pub(crate) fn complete_request(id: i64, done: bool) -> serde_json::Value {
+    serde_json::json!({
+        "v": crate::ipc::PROTOCOL_VERSION,
+        "cmd": "tasks-complete",
+        "id": id,
+        "done": done,
+    })
+}
+
+pub(crate) fn update_request(
+    id: i64,
+    summary: &str,
+    due_ms: Option<i64>,
+    due_all_day: bool,
+    notes: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "v": crate::ipc::PROTOCOL_VERSION,
+        "cmd": "tasks-update",
+        "id": id,
+        "summary": summary,
+        "due_ms": due_ms,
+        "due_all_day": due_all_day,
+        "notes": notes,
+    })
 }
 
 /// The due date an `edit` means, given what it named and what the task
@@ -378,5 +408,51 @@ mod tests {
         assert!(resolve_edit_due(&none, &None, &Some(Some("09:15".into())), &tz)
             .unwrap_err()
             .contains("--at needs --due"));
+    }
+
+    /// The bug this module shipped with: every request here used to carry
+    /// `kind` and camelCase fields — the webview's own vocabulary, not the
+    /// socket's. `crate::ipc::parse_request` is the actual, only parser on
+    /// the other end, and it speaks `v` + `cmd` + snake_case
+    /// (`crate::ipc::Request`'s own derive). A request this module cannot
+    /// get past that parser is not a "no task list" or "no such task"
+    /// refusal — it never reaches those checks — it is silently the wrong
+    /// shape, and `omacal tasks add/edit/done` answered "the request names
+    /// no protocol version" for every caller since the feature shipped.
+    /// Proving these three round-trip through the real parser is the
+    /// regression test: a return to `kind`/camelCase fails here before it
+    /// ever reaches a user's terminal.
+    #[test]
+    fn every_request_this_module_builds_parses_on_the_sockets_own_terms() {
+        match crate::ipc::parse_request(&create_request(Some(3), "Water plants", Some(1_000), false).to_string()) {
+            Ok(crate::ipc::Request::TaskCreate { calendar_id, summary, due_ms, due_all_day }) => {
+                assert_eq!(calendar_id, Some(3));
+                assert_eq!(summary, "Water plants");
+                assert_eq!(due_ms, Some(1_000));
+                assert!(!due_all_day);
+            }
+            other => panic!("create_request did not parse as TaskCreate: {other:?}"),
+        }
+
+        match crate::ipc::parse_request(&complete_request(41, true).to_string()) {
+            Ok(crate::ipc::Request::TaskComplete { id, done }) => {
+                assert_eq!(id, 41);
+                assert!(done);
+            }
+            other => panic!("complete_request did not parse as TaskComplete: {other:?}"),
+        }
+
+        match crate::ipc::parse_request(
+            &update_request(41, "Water plants twice", None, true, Some("weekly")).to_string(),
+        ) {
+            Ok(crate::ipc::Request::TaskUpdate { id, summary, due_ms, due_all_day, notes }) => {
+                assert_eq!(id, 41);
+                assert_eq!(summary, "Water plants twice");
+                assert_eq!(due_ms, None);
+                assert!(due_all_day);
+                assert_eq!(notes.as_deref(), Some("weekly"));
+            }
+            other => panic!("update_request did not parse as TaskUpdate: {other:?}"),
+        }
     }
 }
