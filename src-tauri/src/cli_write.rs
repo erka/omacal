@@ -673,7 +673,7 @@ async fn target(pool: &SqlitePool, id: i64) -> Result<Target, String> {
             .await
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("no event {id} — `omacal events list` prints real ids"))?;
-    let is_organizer = crate::events::is_organizer(
+    let is_organizer = crate::events::owns_event(
         event.organizer_email.as_deref(),
         &account_email,
         &cal_google_id,

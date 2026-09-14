@@ -542,7 +542,7 @@ pub(crate) async fn detail_by_id(pool: &SqlitePool, id: i64) -> anyhow::Result<O
         organizer_email: ev.organizer_email.clone(),
         guests_can_modify: ev.guests_can_modify,
         reach: crate::events::Reach::of(
-            is_organizer(ev.organizer_email.as_deref(), &account_email, &cal_gid),
+            crate::events::owns_event(ev.organizer_email.as_deref(), &account_email, &cal_gid),
             ev.guests_can_modify,
         )
         .as_str(),
