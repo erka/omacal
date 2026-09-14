@@ -1702,6 +1702,7 @@ pub fn run() {
             calendars::set_calendar_label,
             search::search_events,
             events::known_guests,
+            geocode::search_places,
             settings::get_settings,
             settings::set_sync_interval,
             settings::set_notifications_enabled,

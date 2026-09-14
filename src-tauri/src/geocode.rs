@@ -55,6 +55,132 @@ pub(crate) fn merge_places(
     out
 }
 
+/// Photon demo ToS: light personal use; `limit=8` is the politeness layer
+/// on the URL itself. Spaces and the rest percent-encoded the same way
+/// weather.rs encodes a city name — a crate for this would be a crate for
+/// spaces.
+pub(crate) fn photon_url(q: &str, coords: Option<(f64, f64)>) -> String {
+    let mut url = format!(
+        "https://photon.komoot.io/api?q={}&limit=8&lang=en",
+        percent_encode(q)
+    );
+    if let Some((lat, lon)) = coords {
+        url.push_str(&format!("&lat={lat}&lon={lon}"));
+    }
+    url
+}
+
+fn percent_encode(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~') {
+                vec![c.to_string()]
+            } else {
+                c.to_string().bytes().map(|b| format!("%{b:02X}")).collect()
+            }
+        })
+        .collect()
+}
+
+/// `lat,lon|Name` as weather.rs writes `weather_coords`. Used only as a
+/// Photon bias; a miss is unbiased search, never a fetch of wttr.in on
+/// every keystroke.
+pub(crate) fn parse_coords_cache(v: &str) -> Option<(f64, f64)> {
+    let (coords, _) = v.split_once('|')?;
+    let (a, b) = coords.split_once(',')?;
+    Some((a.parse().ok()?, b.parse().ok()?))
+}
+
+const DEMO_LABELS: &[&str] = &[
+    "Banbury Golf Course, 2626 South Marypost Place, Eagle, Idaho 83616, United States",
+    "Room 4A",
+    "Room 4A, Sofia, Bulgaria",
+    "Sofia Office",
+    "Eagle, Idaho, United States",
+];
+
+/// Demo never networks. These stand in for Photon, merged with real
+/// `known_locations` from the demo DB.
+pub(crate) fn demo_canned(query: &str) -> Vec<PlaceHit> {
+    let q = query.trim().to_ascii_lowercase();
+    DEMO_LABELS
+        .iter()
+        .filter(|label| label.to_ascii_lowercase().contains(&q))
+        .map(|label| PlaceHit {
+            label: (*label).to_string(),
+            lat: None,
+            lon: None,
+            source: "search",
+        })
+        .collect()
+}
+
+async fn bias_coords(pool: &sqlx::SqlitePool) -> Option<(f64, f64)> {
+    if let Some(home) = std::env::var_os("HOME") {
+        let p = std::path::Path::new(&home).join(".local/state/omarchy/settings/weather.json");
+        if let Ok(raw) = tokio::fs::read_to_string(&p).await {
+            if let Some((Some(coords), _)) = crate::weather::parse_omarchy_location(&raw) {
+                return Some(coords);
+            }
+        }
+    }
+    crate::settings::read(pool, "weather_coords")
+        .await
+        .as_deref()
+        .and_then(parse_coords_cache)
+}
+
+async fn fetch_photon(url: &str) -> anyhow::Result<String> {
+    use anyhow::Context;
+    let resp = reqwest::Client::builder()
+        .user_agent(concat!("omacal/", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?
+        .get(url)
+        .send()
+        .await
+        .context("photon unreachable")?;
+    if !resp.status().is_success() {
+        anyhow::bail!("photon answered {}", resp.status());
+    }
+    Ok(resp.text().await?)
+}
+
+#[tauri::command]
+pub async fn search_places(
+    state: tauri::State<'_, crate::AppState>,
+    query: String,
+) -> Result<Vec<PlaceHit>, String> {
+    let q = query.trim();
+    if !query_is_searchable(q) {
+        return Ok(Vec::new());
+    }
+    let history = omacal_store::known_locations(&state.pool)
+        .await
+        .map_err(|e| crate::errors::user_facing(&e))?
+        .into_iter()
+        .map(|h| PlaceHit {
+            label: h.label,
+            lat: None,
+            lon: None,
+            source: "history",
+        })
+        .collect::<Vec<_>>();
+    if !may_fetch_photon(state.demo) {
+        return Ok(merge_places(q, &history, &demo_canned(q), 8));
+    }
+    let coords = bias_coords(&state.pool).await;
+    let url = photon_url(q, coords);
+    let remote = match fetch_photon(&url).await {
+        Ok(raw) => parse_photon(&raw).unwrap_or_default(),
+        Err(e) => {
+            tracing::debug!("photon lookup failed: {e:#}");
+            Vec::new()
+        }
+    };
+    Ok(merge_places(q, &history, &remote, 8))
+}
+
 /// Photon GeoJSON → place rows. Garbage and an empty FeatureCollection are
 /// `Ok([])`, never an invented address: a lookup miss is a blank list, not a
 /// guess the form would then save.
@@ -211,5 +337,42 @@ mod tests {
         let merged = merge_places("place", &history, &remote, 8);
         assert_eq!(merged.len(), 8);
         assert!(merged.iter().all(|h| h.source == "history"));
+    }
+
+    #[test]
+    fn photon_url_encodes_the_query_and_pins_limit() {
+        assert_eq!(
+            photon_url("Banbury Golf Course", None),
+            "https://photon.komoot.io/api?q=Banbury%20Golf%20Course&limit=8&lang=en"
+        );
+    }
+
+    #[test]
+    fn photon_url_appends_bias_when_coords_are_known() {
+        let url = photon_url("Eagle", Some((43.6954, -116.354)));
+        assert!(url.starts_with("https://photon.komoot.io/api?q=Eagle&limit=8&lang=en"));
+        assert!(url.contains("&lat=43.6954"));
+        assert!(url.contains("&lon=-116.354"));
+    }
+
+    #[test]
+    fn demo_canned_filters_by_substring_and_includes_banbury() {
+        let hits = demo_canned("banbury");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits[0].label,
+            "Banbury Golf Course, 2626 South Marypost Place, Eagle, Idaho 83616, United States"
+        );
+        assert!(demo_canned("zzzz").is_empty());
+        assert!(demo_canned("room").iter().any(|h| h.label.contains("Room 4A")));
+    }
+
+    #[test]
+    fn weather_coords_cache_parses_lat_lon() {
+        assert_eq!(
+            parse_coords_cache("43.6954,-116.354|Eagle"),
+            Some((43.6954, -116.354))
+        );
+        assert_eq!(parse_coords_cache("junk"), None);
     }
 }
