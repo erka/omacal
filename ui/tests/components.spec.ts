@@ -5220,6 +5220,32 @@ test.describe('DeleteConfirm', () => {
     await expect(page.getByTestId('delete-guest-notice')).toHaveCount(0);
     await expect(page.getByTestId('delete-no-undo')).toBeVisible();
   });
+
+  test('a CalDAV event with attendees promises no email', async ({ page }) => {
+    // The guest list is 'one-off''s, so the only difference from the first
+    // spec is the provider — and the email line has to go with it.
+    await open(page, 'caldav-attendees');
+    await expect(page.getByTestId('delete-guest-notice')).toHaveCount(0);
+    await expect(page.getByTestId('delete-no-mail-notice')).toContainText('OmaCal emails nobody');
+    await expect(page.getByTestId('delete-no-undo')).toBeVisible();
+    await page.getByRole('button', { name: 'Delete' }).click();
+    expect(await confirms(page)).toEqual(['this']);
+  });
+
+  test('somebody else\'s CalDAV event gets no Google own-copy claims', async ({ page }) => {
+    await open(page, 'caldav-invitation');
+    await expect(page.getByTestId('delete-own-copy-notice')).toHaveCount(0);
+    await expect(page.getByTestId('delete-no-mail-notice')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Remove from my calendar' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Delete' })).toBeVisible();
+  });
+
+  test('a CalDAV event nobody else is on says nothing about mail', async ({ page }) => {
+    await open(page, 'caldav-solo');
+    await expect(page.getByTestId('delete-no-mail-notice')).toHaveCount(0);
+    await expect(page.getByTestId('delete-guest-notice')).toHaveCount(0);
+    await expect(page.getByTestId('delete-no-undo')).toBeVisible();
+  });
 });
 
 test.describe('Header invitation tray', () => {

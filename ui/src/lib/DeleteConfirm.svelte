@@ -26,7 +26,7 @@
 
   let scope = $state<Scope>('this');
 
-  /** Everyone the delete emails, which is everyone but the person doing it —
+  /** Everyone else on the event, which on Google is who the delete emails —
    *  the same exclusion `mailableGuests` makes, and for the same reason:
    *  telling somebody they are about to notify themselves is just wrong. */
   const guests = $derived(detail.attendees.filter((a) => !a.is_self).length);
@@ -37,8 +37,13 @@
    *  declined. Unlike a move, `guests_can_modify` changes nothing here:
    *  modifying is one permission, deleting for everyone is the organizer's
    *  alone. So the guest count would be a lie about who loses the event,
-   *  and the panel says what actually happens instead. */
-  const ownCopy = $derived(!detail.is_organizer);
+   *  and the panel says what actually happens instead.
+   *
+   *  **Google's rule, so Google only.** On CalDAV what deleting an invitation
+   *  does to anyone else is the server's business (a shared calendar has no
+   *  "your copy" at all), so the panel claims no reach there and the button
+   *  says Delete. */
+  const ownCopy = $derived(detail.mails_guests && !detail.is_organizer);
   const organizer = $derived(detail.organizer_email ?? 'the organizer');
 </script>
 
@@ -100,7 +105,17 @@
       </div>
     {/if}
 
-    {#if ownCopy}
+    {#if !detail.mails_guests}
+      <!-- CalDAV: the DELETE goes to the server and OmaCal sends nobody mail,
+           whatever the scope. A server that does CalDAV scheduling (RFC 6638)
+           may tell the others itself — the same two halves the form's
+           attendee hint names. Nothing at all for an event nobody else is on. -->
+      {#if guests > 0}
+        <p class="notice" data-testid="delete-no-mail-notice">
+          OmaCal emails nobody about this; a server that handles scheduling may.
+        </p>
+      {/if}
+    {:else if ownCopy}
       <p class="notice" data-testid="delete-own-copy-notice">
         You are a guest on this event. Removing it takes it off your calendar only — {organizer}
         and the other guests keep theirs, and Google tells {organizer} you declined.

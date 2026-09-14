@@ -1771,7 +1771,10 @@
       busy = false;
     }
 
-    const guests = detail.attendees.filter((a) => !a.is_self).length;
+    // Anybody the move could email. None on CalDAV however many attendees
+    // there are (`mails_guests`), so a one-off there moves unasked — the same
+    // silence the form's Save keeps on that provider.
+    const guests = detail.mails_guests ? detail.attendees.filter((a) => !a.is_self).length : 0;
     if (guests === 0 && !detail.is_recurring) {
       // Nobody to tell and one occurrence to move: nothing to ask.
       await commitMove(event, span, { scope: 'all', sendUpdates: 'none' });

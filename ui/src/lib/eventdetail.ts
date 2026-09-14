@@ -98,6 +98,11 @@ export type EventDetail = {
   /** Google's `guestsCanModify`: the organizer let guests change the event
    *  for everyone. Meaningful only when `is_organizer` is false. */
   guests_can_modify: boolean;
+  /** Whether this event's provider emails the people on it when asked to:
+   *  Google does, CalDAV does not. `false` means no notify choice and no
+   *  "told by email" line anywhere — see `MoveConfirm` and `DeleteConfirm`.
+   *  The form reads the same fact off the calendar's `provider`. */
+  mails_guests: boolean;
   attendees: Attendee[];
   /** What this event asks for: the calendar's defaults, or its own
    *  overrides — the two fields are alternatives (reminders spec §3). */
