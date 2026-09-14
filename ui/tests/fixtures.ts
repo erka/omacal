@@ -512,6 +512,9 @@ const detail = (o: Partial<EventDetail> & { id: number }): EventDetail => ({
   // passed by fixture if the default went the other way.
   is_organizer: true,
   guests_can_modify: false,
+  // A Google event, which is what every fixture here was written against. A
+  // CalDAV spec sets `mails_guests: false` on purpose.
+  mails_guests: true,
   // `false`, deliberately, and not because any fixture here wants it: nothing
   // reads this field yet, and Task 10 ships the Edit and Delete controls that
   // will.
@@ -1568,6 +1571,13 @@ export const APP_GUEST_OF_ID = 4248;
 export const APP_SHARED_ID = 4249;
 const APP_GUEST_OF_START = APP_MON + 48 * H + 10 * H;
 const APP_SHARED_START = APP_MON + 48 * H + 13 * H;
+/** Two CalDAV events with attendees, where `mails_guests` is `false`: OmaCal
+ *  sends nobody mail there, so a drag must never offer to. 'Book club' is a
+ *  one-off (moves unasked), 'Choir' repeats (asks the scope, nothing else). */
+export const APP_CALDAV_ONE_OFF_ID = 4250;
+export const APP_CALDAV_SERIES_ID = 4251;
+const APP_CALDAV_ONE_OFF_START = APP_MON + 72 * H + 10 * H;
+const APP_CALDAV_SERIES_START = APP_MON + 72 * H + 13 * H;
 export const APP_ALLDAY_ID = 4244;
 /** Monday 29 Jan 2024, all day — the all-day series' own DTSTART, and what
  *  `event_detail` reports as its master row's `start_ms`. */
@@ -1705,6 +1715,14 @@ const APP_SHARED_BLOCK: UiEvent = ev({
   id: APP_SHARED_ID, title: 'Design review',
   start_ms: APP_SHARED_START, end_ms: APP_SHARED_START + 30 * 60_000,
 });
+const APP_CALDAV_ONE_OFF_BLOCK: UiEvent = ev({
+  id: APP_CALDAV_ONE_OFF_ID, title: 'Book club',
+  start_ms: APP_CALDAV_ONE_OFF_START, end_ms: APP_CALDAV_ONE_OFF_START + 30 * 60_000,
+});
+const APP_CALDAV_SERIES_BLOCK: UiEvent = ev({
+  id: APP_CALDAV_SERIES_ID, title: 'Choir',
+  start_ms: APP_CALDAV_SERIES_START, end_ms: APP_CALDAV_SERIES_START + 30 * 60_000,
+});
 /** The band chip. `commands::assemble_week` routes every `is_all_day` event
  *  into `all_day_events` and never into a day column, so a chip is the only
  *  representation this event ever gets — there is no `EventBlock` to fall back
@@ -1793,6 +1811,30 @@ POPOVER_DETAILS[APP_SHARED_ID] = detail({
   ],
 });
 
+POPOVER_DETAILS[APP_CALDAV_ONE_OFF_ID] = detail({
+  id: APP_CALDAV_ONE_OFF_ID, title: 'Book club', can_edit: true,
+  calendar_id: APP_PRIMARY_CALENDAR_ID, mails_guests: false,
+  start_ms: APP_CALDAV_ONE_OFF_START, end_ms: APP_CALDAV_ONE_OFF_START + 30 * 60_000,
+  attendees: [
+    attendee({ email: 'ana@x.com', display_name: 'Ana', response_status: 'accepted' }),
+    attendee({ email: 'me@x.com', is_self: true }),
+  ],
+});
+POPOVER_DETAILS[APP_CALDAV_SERIES_ID] = detail({
+  id: APP_CALDAV_SERIES_ID, title: 'Choir', can_edit: true,
+  calendar_id: APP_PRIMARY_CALENDAR_ID, mails_guests: false,
+  is_recurring: true, recurrence: 'RRULE:FREQ=WEEKLY', repeat: 'weekly',
+  start_ms: APP_CALDAV_SERIES_START, end_ms: APP_CALDAV_SERIES_START + 30 * 60_000,
+  // Somebody else organizes it: on Google that is the own-copy notice, which
+  // is Google's rule and must not appear here.
+  organizer_email: 'ana@x.com', is_organizer: false,
+  attendees: [
+    attendee({ email: 'ana@x.com', display_name: 'Ana', response_status: 'accepted' }),
+    attendee({ email: 'petya@x.com' }),
+    attendee({ email: 'me@x.com', is_self: true }),
+  ],
+});
+
 POPOVER_DETAILS[APP_SOLO_SERIES_ID] = detail({
   id: APP_SOLO_SERIES_ID, title: 'Gym', can_edit: true,
   calendar_id: APP_PRIMARY_CALENDAR_ID,
@@ -1864,6 +1906,14 @@ export const appWritableWeek = (): WeekPayload => {
     start_ms: APP_MON + 48 * H,
     end_ms: APP_MON + 72 * H,
     events: [APP_GUEST_OF_BLOCK, APP_SHARED_BLOCK],
+    placed: [placed(0.02, 0.02, 0, 1, 0), placed(0.06, 0.02, 0, 1, 1)],
+  };
+  // CalDAV events with attendees, on the fourth day: nobody is mailed there,
+  // so neither may be offered a notify choice.
+  w.days[3] = {
+    start_ms: APP_MON + 72 * H,
+    end_ms: APP_MON + 96 * H,
+    events: [APP_CALDAV_ONE_OFF_BLOCK, APP_CALDAV_SERIES_BLOCK],
     placed: [placed(0.02, 0.02, 0, 1, 0), placed(0.06, 0.02, 0, 1, 1)],
   };
   return w;
@@ -3005,6 +3055,36 @@ export const FIXTURES: Record<string, Record<string, any>> = {
     // "0 guests are told by email", which is both untrue and alarming.
     'no-guests': {
       detail: detail({ id: 22, title: 'Focus time', can_edit: true }),
+      anchor: ANCHOR, onconfirm: noop, oncancel: noop,
+    },
+    // CalDAV, with the same guest list as 'one-off': OmaCal mails nobody
+    // there, so "2 guests are told by email" would be a promise nobody keeps.
+    'caldav-attendees': {
+      detail: detail({
+        id: 23, title: 'Book club', can_edit: true, mails_guests: false,
+        attendees: [
+          attendee({ email: 'ana@x.com', display_name: 'Ana' }),
+          attendee({ email: 'petya@x.com' }),
+          attendee({ email: 'me@x.com', is_self: true }),
+        ],
+      }),
+      anchor: ANCHOR, onconfirm: noop, oncancel: noop,
+    },
+    // Somebody else's event on CalDAV. Google's own-copy rule ("tells the
+    // organizer you declined", "Remove from my calendar") is not CalDAV's.
+    'caldav-invitation': {
+      detail: detail({
+        id: 24, title: 'Choir', can_edit: true, mails_guests: false,
+        organizer_email: 'ana@x.com', is_organizer: false,
+        attendees: [
+          attendee({ email: 'ana@x.com', display_name: 'Ana' }),
+          attendee({ email: 'me@x.com', is_self: true }),
+        ],
+      }),
+      anchor: ANCHOR, onconfirm: noop, oncancel: noop,
+    },
+    'caldav-solo': {
+      detail: detail({ id: 25, title: 'Dentist', can_edit: true, mails_guests: false }),
       anchor: ANCHOR, onconfirm: noop, oncancel: noop,
     },
   },

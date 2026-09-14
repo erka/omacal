@@ -275,6 +275,45 @@ pub(crate) fn notify_for_reach(
     }
 }
 
+/// The notify rule on a calendar whose provider mails nobody (CalDAV,
+/// `EventDetail::mails_guests` false). There is nobody to notify however
+/// many attendees the event has, so the flag is unnecessary, `none` is
+/// accepted as what happens anyway, and `all` is refused with the reason —
+/// the own-copy shape above, for a different reason. Read *instead of*
+/// [`notify_for_reach`] and [`notify_for`], never after them: an answer
+/// they would demand is one nothing on this calendar can act on.
+pub(crate) fn notify_without_mail(asked: Option<&str>) -> Result<&'static str, String> {
+    match asked {
+        None | Some("none") => Ok("none"),
+        Some("all") => Err(
+            "OmaCal emails nobody on a CalDAV calendar, so there is nobody to notify; drop --notify"
+                .into(),
+        ),
+        Some(other) => Err(format!("--notify takes all|none, not \"{other}\"")),
+    }
+}
+
+/// Whether a calendar's provider mails the people on an event: the rule
+/// `EventDetail::mails_guests` answers for the app, asked of the CLI's
+/// read-only pool. A calendar that cannot be read reads as mailing, so the
+/// notify question is asked rather than skipped — the side a wrong answer
+/// should fall on.
+async fn calendar_mails_guests(pool: &SqlitePool, calendar_id: Option<i64>) -> bool {
+    let Some(id) = calendar_id else { return true };
+    !matches!(crate::caldav_write::is_caldav_calendar(pool, id).await, Ok(true))
+}
+
+/// [`calendar_mails_guests`] for a create: the calendar named, or the one
+/// the app's own default rule (`ipc::default_calendar`) will pick when none
+/// is, asked of the same database.
+async fn create_mails_guests(pool: &SqlitePool, calendar: Option<i64>) -> bool {
+    let calendar = match calendar {
+        Some(id) => Some(id),
+        None => crate::ipc::default_calendar(pool).await,
+    };
+    calendar_mails_guests(pool, calendar).await
+}
+
 /// Whether guests hear about a write. Touching a guest list without an
 /// answer is the refusal; a guestless write quietly mails nobody, which is
 /// the only thing it could honestly do.
@@ -648,6 +687,9 @@ struct Target {
     /// notify rule has nobody to apply to, and says so instead of demanding
     /// an answer.
     reach: crate::events::Reach,
+    /// See [`calendar_mails_guests`]. `false` replaces the notify rule with
+    /// [`notify_without_mail`].
+    mails_guests: bool,
     all_day: bool,
     start_ms: i64,
     end_ms: i64,
@@ -673,7 +715,7 @@ async fn target(pool: &SqlitePool, id: i64) -> Result<Target, String> {
             .await
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("no event {id} — `omacal events list` prints real ids"))?;
-    let is_organizer = crate::events::is_organizer(
+    let is_organizer = crate::events::owns_event(
         event.organizer_email.as_deref(),
         &account_email,
         &cal_google_id,
@@ -681,6 +723,7 @@ async fn target(pool: &SqlitePool, id: i64) -> Result<Target, String> {
     Ok(Target {
         recurring: event.recurrence.is_some() || event.recurring_event_id.is_some(),
         reach: crate::events::Reach::of(is_organizer, event.guests_can_modify),
+        mails_guests: calendar_mails_guests(pool, Some(event.calendar_id)).await,
         // The guest-list rule counts *other people*: a solo event mails
         // nobody whatever the flag says, and `mailableGuests` upstream
         // counts the same way.
@@ -711,7 +754,12 @@ pub(crate) async fn execute(pool: &SqlitePool, cmd: &WriteCmd, json: bool) -> i3
         // Taken above; the compiler wants it named all the same.
         WriteCmd::Task(_) => unreachable!("handled at the top of execute"),
         WriteCmd::Create(args) => {
-            let notify = match notify_for(!args.guests.is_empty(), args.notify.as_deref()) {
+            let notify = if create_mails_guests(pool, args.calendar).await {
+                notify_for(!args.guests.is_empty(), args.notify.as_deref())
+            } else {
+                notify_without_mail(args.notify.as_deref())
+            };
+            let notify = match notify {
                 Ok(n) => n,
                 Err(m) => return refuse(&m),
             };
@@ -756,7 +804,12 @@ pub(crate) async fn execute(pool: &SqlitePool, cmd: &WriteCmd, json: bool) -> i3
                 Ok(s) => s,
                 Err(m) => return refuse(&m),
             };
-            let notify = match notify_for_reach(t.reach, t.has_other_guests, args.notify.as_deref()) {
+            let notify = if t.mails_guests {
+                notify_for_reach(t.reach, t.has_other_guests, args.notify.as_deref())
+            } else {
+                notify_without_mail(args.notify.as_deref())
+            };
+            let notify = match notify {
                 Ok(n) => n,
                 Err(m) => return refuse(&m),
             };
@@ -1021,6 +1074,45 @@ mod tests {
         assert!(notify_for_reach(Reach::Shared, true, None).is_err(), "still asked");
         assert_eq!(notify_for_reach(Reach::Shared, true, Some("all")).unwrap(), "all");
         assert_eq!(notify_for_reach(Reach::Organizer, false, None).unwrap(), "none");
+    }
+
+    /// CalDAV mails nobody: no flag needed whatever the guest list, `none`
+    /// accepted, `all` refused with the reason, a bad word still a bad word.
+    #[test]
+    fn a_calendar_that_mails_nobody_has_nobody_to_notify() {
+        assert_eq!(notify_without_mail(None).unwrap(), "none");
+        assert_eq!(notify_without_mail(Some("none")).unwrap(), "none");
+        let err = notify_without_mail(Some("all")).unwrap_err();
+        assert!(err.contains("nobody to notify") && err.contains("CalDAV"), "{err}");
+        assert!(notify_without_mail(Some("everyone")).unwrap_err().contains("all|none"));
+    }
+
+    /// The wiring behind the rule above, against a real store: an update's
+    /// target and a create (named calendar or the default rule) both read
+    /// the owning account's provider, and a calendar nothing can be read
+    /// for falls on the asking side.
+    #[tokio::test]
+    async fn the_write_path_reads_the_provider_off_the_calendar() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        for q in [
+            "INSERT INTO accounts (google_sub, email, created_at) VALUES ('s','me@x.test',0)",
+            "INSERT INTO calendars (account_id, google_id, summary, timezone, access_role, is_primary)
+             VALUES (1, 'me@x.test', 'Work', 'UTC', 'owner', 1)",
+            "INSERT INTO events (calendar_id, google_id, summary, start_utc, end_utc,
+                                 start_tz, end_tz, is_all_day, status, updated_at)
+             VALUES (1, 'g1', 'Book club', 1786352400000, 1786356000000,
+                     'UTC', 'UTC', 0, 'confirmed', 0)",
+        ] {
+            sqlx::query(q).execute(&pool).await.unwrap();
+        }
+        assert!(target(&pool, 1).await.unwrap().mails_guests, "Google mails");
+        assert!(create_mails_guests(&pool, None).await, "the default calendar is Google");
+
+        sqlx::query("UPDATE accounts SET provider = 'caldav'").execute(&pool).await.unwrap();
+        assert!(!target(&pool, 1).await.unwrap().mails_guests, "CalDAV does not");
+        assert!(!create_mails_guests(&pool, Some(1)).await, "named");
+        assert!(!create_mails_guests(&pool, None).await, "by the default rule");
+        assert!(create_mails_guests(&pool, Some(99)).await, "unknown calendar asks");
     }
 
     /// §4's notify rule: guests demand an answer, solitude implies none.

@@ -496,7 +496,16 @@ pub(crate) struct Detail {
     /// reaches (`events::Reach`). `own-copy` is the one that changes what a
     /// write means: an update lands on the user's calendar alone, nobody
     /// else's copy moves, and `--notify` has nobody to reach.
+    ///
+    /// This is Google's model. On a calendar that does not mail guests
+    /// (`mails_guests` false, CalDAV) what reaches anybody else is the
+    /// server's business, and the notify rule does not read `reach` at all.
     pub reach: &'static str,
+    /// Whether this event's provider emails the people on it when a write
+    /// asks it to — `EventDetail::mails_guests`, the fact the app's move and
+    /// delete dialogs read. `false` on CalDAV: `--notify` is never needed
+    /// there and `--notify all` is refused, since nothing would be sent.
+    pub mails_guests: bool,
     pub response: Option<String>,
     pub conference: Option<String>,
     pub guests: Vec<DetailGuest>,
@@ -508,15 +517,16 @@ pub(crate) async fn detail_by_id(pool: &SqlitePool, id: i64) -> anyhow::Result<O
     let Some((ev, _role, _tz)) = omacal_store::event_by_id(pool, id).await? else {
         return Ok(None);
     };
-    let (cal_name, account_email, cal_gid): (String, String, String) = sqlx::query_as(
-        "SELECT COALESCE(c.label_override, c.summary), a.email, c.google_id FROM calendars c
-         JOIN accounts a ON a.id = c.account_id WHERE c.id = ?1",
-    )
-    .bind(ev.calendar_id)
-    .fetch_optional(pool)
-    .await
-    .map(|r: Option<(String, String, String)>| r.unwrap_or_default())
-    .map_err(anyhow::Error::from)?;
+    let (cal_name, account_email, cal_gid, provider): (String, String, String, String) =
+        sqlx::query_as(
+            "SELECT COALESCE(c.label_override, c.summary), a.email, c.google_id, a.provider
+               FROM calendars c JOIN accounts a ON a.id = c.account_id WHERE c.id = ?1",
+        )
+        .bind(ev.calendar_id)
+        .fetch_optional(pool)
+        .await
+        .map(|r: Option<(String, String, String, String)>| r.unwrap_or_default())
+        .map_err(anyhow::Error::from)?;
 
     let tz = jiff::tz::TimeZone::system();
     let stamp = |ms: i64| -> String {
@@ -542,10 +552,11 @@ pub(crate) async fn detail_by_id(pool: &SqlitePool, id: i64) -> anyhow::Result<O
         organizer_email: ev.organizer_email.clone(),
         guests_can_modify: ev.guests_can_modify,
         reach: crate::events::Reach::of(
-            is_organizer(ev.organizer_email.as_deref(), &account_email, &cal_gid),
+            crate::events::owns_event(ev.organizer_email.as_deref(), &account_email, &cal_gid),
             ev.guests_can_modify,
         )
         .as_str(),
+        mails_guests: provider != "caldav",
         response: ev.self_response.clone(),
         conference: ev.conference_uri.clone().or_else(|| {
             crate::upcoming::conference_join_url(ev.location.as_deref(), ev.description.as_deref())
@@ -591,10 +602,18 @@ fn print_detail_human(d: &Detail) {
         d.calendar,
         if d.organizer { "  · your event" } else { "" }
     );
-    match d.reach {
-        "own-copy" => println!("You are a guest: a change here moves only your copy, and nobody is told"),
-        "shared" => println!("You are a guest, and the organizer lets guests change this for everyone"),
-        _ => {}
+    if !d.mails_guests {
+        // CalDAV: Google's reach lines would be claims about a server this
+        // app does not control. The one true thing is who OmaCal mails.
+        if d.guests.iter().any(|g| !g.is_self) {
+            println!("OmaCal emails nobody about changes here; a server that handles scheduling may");
+        }
+    } else {
+        match d.reach {
+            "own-copy" => println!("You are a guest: a change here moves only your copy, and nobody is told"),
+            "shared" => println!("You are a guest, and the organizer lets guests change this for everyone"),
+            _ => {}
+        }
     }
     if d.guests.is_empty() {
         println!("Guests: none");
@@ -1329,6 +1348,12 @@ mod tests {
             detail_by_id(&pool, 99).await.unwrap().is_none(),
             "an unknown id is an answer, not an error",
         );
+
+        // A Google account mails its guests; the same row on a CalDAV account
+        // does not, and `show` says so for an agent deciding about --notify.
+        assert!(d.mails_guests);
+        sqlx::query("UPDATE accounts SET provider = 'caldav'").execute(&pool).await.unwrap();
+        assert!(!detail_by_id(&pool, 1).await.unwrap().unwrap().mails_guests);
     }
 
     /// The comparison behind `Row::organizer`, as a table — Google's

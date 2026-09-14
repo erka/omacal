@@ -623,6 +623,22 @@ pub enum TodoDue {
     At(Timestamp),
 }
 
+/// A `DTSTART`/`DUE`-shaped wall-time line: `TZID` in the calendar's own
+/// zone, or a bare UTC stamp when jiff cannot resolve it. Shared so a
+/// mirrored `DTSTART` is spelled exactly the way its `DUE` is.
+fn zoned_line(name: &str, t: Timestamp, cal_tz: &str) -> String {
+    match jiff::tz::TimeZone::get(cal_tz) {
+        Ok(tz) => {
+            let z = t.to_zoned(tz);
+            format!(
+                "{name};TZID={cal_tz}:{:04}{:02}{:02}T{:02}{:02}{:02}",
+                z.year(), z.month(), z.day(), z.hour(), z.minute(), z.second()
+            )
+        }
+        Err(_) => format!("{name}:{}", fmt_utc(t)),
+    }
+}
+
 impl TodoDue {
     /// The `DUE` line, with a timed due rendered as a wall time in the
     /// calendar's own zone.
@@ -640,31 +656,40 @@ impl TodoDue {
             TodoDue::Date(d) => {
                 format!("DUE;VALUE=DATE:{:04}{:02}{:02}", d.year(), d.month(), d.day())
             }
-            TodoDue::At(t) => match jiff::tz::TimeZone::get(cal_tz) {
-                Ok(tz) => {
-                    let z = t.to_zoned(tz);
-                    format!(
-                        "DUE;TZID={cal_tz}:{:04}{:02}{:02}T{:02}{:02}{:02}",
-                        z.year(), z.month(), z.day(), z.hour(), z.minute(), z.second()
-                    )
-                }
-                Err(_) => format!("DUE:{}", fmt_utc(*t)),
-            },
+            TodoDue::At(t) => zoned_line("DUE", *t, cal_tz),
         }
     }
 
-    /// Whether `DTSTART` may stay beside this due.
+    /// A `DTSTART` at the same instant as this due — `None` for a bare date,
+    /// since OmaCal still has no notion of a task's start to fabricate one
+    /// for.
+    ///
+    /// **Confirmed against a real iCloud account** (issue #102, the sequel):
+    /// a `DUE` sent alone — or beside a `DTSTART` that no longer matches it —
+    /// round-trips through iCloud's Reminders backend as a date-only due,
+    /// the time silently dropped, whether or not the property carries a
+    /// `TZID`. A task iOS itself created always pairs a timed due with a
+    /// `DTSTART` at the identical instant, and mirroring that pairing is what
+    /// this method is for. Discarding another client's own `DTSTART` this
+    /// way is still the cost of last resort — see [`TodoDue::admits_start`]
+    /// for the narrower case, a bare-date due, where an existing start is
+    /// kept rather than replaced.
+    fn mirrored_start(&self, cal_tz: &str) -> Option<String> {
+        match self {
+            TodoDue::Date(_) => None,
+            TodoDue::At(t) => Some(zoned_line("DTSTART", *t, cal_tz)),
+        }
+    }
+
+    /// Whether an *existing* `DTSTART` may stay beside a bare-date due.
     ///
     /// RFC 5545 §3.6.2 asks two things of the pair: the same value type, and
     /// a `DTSTART` strictly earlier than the `DUE`. A resource that breaks
-    /// either is one a strict server is entitled to reject or rewrite, and
-    /// rewriting is the shape of issue #102 — the time went out and did not
-    /// come back.
+    /// either is one a strict server is entitled to reject or rewrite.
     ///
-    /// OmaCal has no notion of a task *start*, so there is no truthful value
-    /// to put there when the pair no longer agrees; the property is dropped
-    /// instead of being invented. Kept whenever it is still valid, because
-    /// discarding another client's data is the cost of last resort.
+    /// Only reached for [`TodoDue::Date`] — a timed due always replaces
+    /// `DTSTART` outright via [`TodoDue::mirrored_start`], never merely
+    /// keeps or drops what was there.
     fn admits_start(&self, start: &IcsTime, cal_tz: &str) -> bool {
         match (self, start) {
             (TodoDue::Date(due), IcsTime::Date(from)) => from < due,
@@ -686,11 +711,13 @@ impl TodoDue {
 /// tells every other client that this version supersedes the one they hold.
 /// A task with no SEQUENCE is treated as 0, per the RFC.
 ///
-/// `cal_tz` is the calendar's zone: it is the zone a timed due goes out in,
-/// and the one an existing `DTSTART` is read back in to decide whether it may
-/// stay. See [`TodoDue::line`] and [`TodoDue::admits_start`] — a task list
-/// created from Apple Reminders carries a `DTSTART`, and leaving a bare-date
-/// one beside a newly timed `DUE` is the invalid pair issue #102 describes.
+/// `cal_tz` is the calendar's zone: it is the zone a timed due (and its
+/// mirrored `DTSTART`) goes out in, and the one an existing `DTSTART` is read
+/// back in to decide whether it may stay beside a bare-date due. See
+/// [`TodoDue::line`], [`TodoDue::mirrored_start`] and
+/// [`TodoDue::admits_start`] — a task list created from Apple Reminders
+/// carries a `DTSTART`, and a timed `DUE` needs one at the same instant or
+/// iCloud drops the time, the invalid-pair shape issue #102 first described.
 pub fn patch_todo_fields(raw: &str, uid: &str, edit: &TodoEdit, cal_tz: &str, now: Timestamp) -> Option<String> {
     patch_todo(raw, uid, |inner| {
         let sequence = inner
@@ -699,19 +726,23 @@ pub fn patch_todo_fields(raw: &str, uid: &str, edit: &TodoEdit, cal_tz: &str, no
             .and_then(|l| l.split_once(':'))
             .and_then(|(_, v)| v.trim().parse::<i64>().ok())
             .unwrap_or(0);
-        // A `DTSTART` the resource already carries survives only while it
-        // still agrees with the new `DUE`; the RFC wants the same value type
-        // and an earlier instant, and neither is ours to fake.
-        let drop_start = edit.due.is_some_and(|due| {
-            inner
-                .iter()
-                .filter(|l| {
-                    let u = l.to_ascii_uppercase();
-                    u.starts_with("DTSTART:") || u.starts_with("DTSTART;")
-                })
-                .filter_map(|l| parse_line(l))
-                .any(|p| parse_time(&p).is_none_or(|t| !due.admits_start(&t, cal_tz)))
-        });
+        // A timed due always gets its own mirrored `DTSTART`, replacing
+        // whatever was there; a bare-date due keeps an existing `DTSTART`
+        // only while it still agrees with the new `DUE` — the RFC wants the
+        // same value type and an earlier instant, and neither is ours to
+        // fake.
+        let mirrored_start = edit.due.and_then(|due| due.mirrored_start(cal_tz));
+        let drop_start = mirrored_start.is_some()
+            || edit.due.is_some_and(|due| {
+                inner
+                    .iter()
+                    .filter(|l| {
+                        let u = l.to_ascii_uppercase();
+                        u.starts_with("DTSTART:") || u.starts_with("DTSTART;")
+                    })
+                    .filter_map(|l| parse_line(l))
+                    .any(|p| parse_time(&p).is_none_or(|t| !due.admits_start(&t, cal_tz)))
+            });
 
         let mut kept: Vec<String> = inner
             .iter()
@@ -736,6 +767,9 @@ pub fn patch_todo_fields(raw: &str, uid: &str, edit: &TodoEdit, cal_tz: &str, no
             .cloned()
             .collect();
         kept.push(format!("SUMMARY:{}", escape(edit.summary)));
+        if let Some(start) = &mirrored_start {
+            kept.push(start.clone());
+        }
         if let Some(due) = edit.due {
             kept.push(due.line(cal_tz));
         }
@@ -830,9 +864,12 @@ pub fn patch_todo_status(raw: &str, uid: &str, completed: bool, now: Timestamp) 
 
 /// A brand-new single-VTODO resource.
 ///
-/// No `DTSTART`: OmaCal has no notion of when a task *starts*, and the RFC
-/// only constrains the property when it is there. See [`TodoDue::line`] for
-/// why the due itself carries a zone rather than a `Z`.
+/// No `DTSTART` for a bare-date due: OmaCal has no notion of when a task
+/// *starts*, and the RFC only constrains the property when it is there. A
+/// *timed* due gets one anyway, at the identical instant — see
+/// [`TodoDue::mirrored_start`] for why: a `DUE` iCloud is handed without a
+/// matching `DTSTART` round-trips with its time silently dropped, and a
+/// brand-new task is exactly as exposed to that as an edited one.
 pub fn new_todo_ics(uid: &str, summary: &str, due: Option<&IcsTime>, now: Timestamp) -> String {
     let mut lines = vec![
         "BEGIN:VCALENDAR".to_string(),
@@ -852,15 +889,30 @@ pub fn new_todo_ics(uid: &str, summary: &str, due: Option<&IcsTime>, now: Timest
                 d.month(),
                 d.day()
             )),
-            IcsTime::Utc(ts) => lines.push(format!("DUE:{}", fmt_utc(*ts))),
-            IcsTime::Zoned { dt, tzid } => lines.push(format!(
-                "DUE;TZID={tzid}:{:04}{:02}{:02}T{:02}{:02}{:02}",
-                dt.year(), dt.month(), dt.day(), dt.hour(), dt.minute(), dt.second()
-            )),
-            IcsTime::Floating(dt) => lines.push(format!(
-                "DUE:{:04}{:02}{:02}T{:02}{:02}{:02}",
-                dt.year(), dt.month(), dt.day(), dt.hour(), dt.minute(), dt.second()
-            )),
+            IcsTime::Utc(ts) => {
+                lines.push(format!("DTSTART:{}", fmt_utc(*ts)));
+                lines.push(format!("DUE:{}", fmt_utc(*ts)));
+            }
+            IcsTime::Zoned { dt, tzid } => {
+                lines.push(format!(
+                    "DTSTART;TZID={tzid}:{:04}{:02}{:02}T{:02}{:02}{:02}",
+                    dt.year(), dt.month(), dt.day(), dt.hour(), dt.minute(), dt.second()
+                ));
+                lines.push(format!(
+                    "DUE;TZID={tzid}:{:04}{:02}{:02}T{:02}{:02}{:02}",
+                    dt.year(), dt.month(), dt.day(), dt.hour(), dt.minute(), dt.second()
+                ));
+            }
+            IcsTime::Floating(dt) => {
+                lines.push(format!(
+                    "DTSTART:{:04}{:02}{:02}T{:02}{:02}{:02}",
+                    dt.year(), dt.month(), dt.day(), dt.hour(), dt.minute(), dt.second()
+                ));
+                lines.push(format!(
+                    "DUE:{:04}{:02}{:02}T{:02}{:02}{:02}",
+                    dt.year(), dt.month(), dt.day(), dt.hour(), dt.minute(), dt.second()
+                ));
+            }
         }
     }
     lines.push("END:VTODO".to_string());
@@ -1728,6 +1780,10 @@ mod tests {
         assert!(out.contains("SUMMARY:New title"), "{out}");
         assert!(!out.contains("Old title"));
         assert!(out.contains("DUE;TZID=Europe/Sofia:20260911T153000"), "{out}");
+        assert!(
+            out.contains("DTSTART;TZID=Europe/Sofia:20260911T153000"),
+            "iCloud only honours a timed DUE when DTSTART mirrors it: {out}"
+        );
         assert!(!out.contains("VALUE=DATE"), "the old date-only DUE is gone");
         assert!(out.contains("DESCRIPTION:new note"));
         // SEQUENCE is what tells other clients this supersedes their copy.
@@ -1775,16 +1831,18 @@ mod tests {
         assert!(out.contains("DUE;VALUE=DATE:20260910"), "{out}");
     }
 
-    /// Issue #102, and the shape the reporter is on: a list added to Apple
-    /// Reminders through CalDAV, whose tasks Reminders wrote with a
-    /// `DTSTART`. Giving such a task a time left `DTSTART;VALUE=DATE` beside
-    /// a `DUE` that is now a DATE-TIME — RFC 5545 §3.6.2 asks for the same
-    /// value type on both, and a server is entitled to reject or rewrite the
-    /// pair, which is a time that goes out and does not come back.
-    ///
-    /// There is no honest value to convert the start to, so it goes.
+    /// Issue #102, confirmed against a real iCloud account: a list added to
+    /// Apple Reminders through CalDAV, whose tasks Reminders wrote with a
+    /// `DTSTART`. A `DUE` sent without a matching `DTSTART` — or with a
+    /// `DTSTART;VALUE=DATE` beside a now DATE-TIME `DUE`, which RFC 5545
+    /// §3.6.2 already forbids — round-trips through iCloud's Reminders
+    /// backend as a date-only due, the time silently dropped. Apple's own
+    /// client never sends a timed due without an identical `DTSTART`
+    /// (verified from a task iOS itself created), so this mirrors that: the
+    /// old bare-date start is replaced with one at the same instant as the
+    /// new due, not merely dropped.
     #[test]
-    fn a_timed_due_takes_a_bare_date_dtstart_with_it() {
+    fn a_timed_due_takes_a_matching_dtstart_with_it() {
         let raw = "BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\nUID:t-2\r\nSUMMARY:Buy stamps\r\n\
             DTSTART;VALUE=DATE:20260910\r\nDUE;VALUE=DATE:20260911\r\n\
             X-APPLE-SORT-ORDER:12\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
@@ -1796,8 +1854,12 @@ mod tests {
         };
         let out = patch_todo_fields(raw, "t-2", &edit, "Europe/Sofia", now).unwrap();
 
-        assert!(!out.contains("DTSTART"), "a bare-date start cannot stand beside a timed due: {out}");
+        assert!(!out.contains("VALUE=DATE"), "the bare-date start cannot stand beside a timed due: {out}");
         assert!(out.contains("DUE;TZID=Europe/Sofia:20260911T153000"), "{out}");
+        assert!(
+            out.contains("DTSTART;TZID=Europe/Sofia:20260911T153000"),
+            "the new start mirrors the new due, the way iCloud's own writes do: {out}"
+        );
         assert!(out.contains("X-APPLE-SORT-ORDER:12"), "everything else we do not model survives");
     }
 
@@ -1820,9 +1882,10 @@ mod tests {
     }
 
     /// A start that is the right value type but no longer earlier than the
-    /// due is just as invalid, and goes for the same reason.
+    /// due is just as invalid, and is replaced by the mirrored start for the
+    /// same reason a bare-date one is.
     #[test]
-    fn a_dtstart_later_than_the_due_goes_too() {
+    fn a_dtstart_later_than_the_due_is_replaced_too() {
         let raw = "BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\nUID:t-4\r\nSUMMARY:Thing\r\n\
             DTSTART;TZID=Europe/Sofia:20260911T180000\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
         let now: Timestamp = "2026-09-07T09:00:00Z".parse().unwrap();
@@ -1833,7 +1896,8 @@ mod tests {
             description: None,
         };
         let out = patch_todo_fields(raw, "t-4", &edit, "Europe/Sofia", now).unwrap();
-        assert!(!out.contains("DTSTART"), "{out}");
+        assert!(!out.contains("180000"), "the stale 18:00 start is gone: {out}");
+        assert!(out.contains("DTSTART;TZID=Europe/Sofia:20260911T153000"), "{out}");
     }
 
     /// The due a user set is the due that comes back, whichever spelling it
@@ -2187,6 +2251,29 @@ END:VEVENT\r\nEND:VCALENDAR";
         assert_eq!(t.uid, "new-1");
         assert_eq!(t.summary.as_deref(), Some("Fix; the, thing"), "escaping round-trips");
         assert!(matches!(t.due, Some(IcsTime::Date(_))));
+    }
+
+    /// A task created with a time, not just a date, needs the same mirrored
+    /// `DTSTART` a later edit gets — a brand-new task is exactly as likely
+    /// to have its time silently dropped by iCloud as an edited one.
+    #[test]
+    fn a_new_todo_with_a_time_gets_a_matching_dtstart() {
+        let now = Timestamp::from_millisecond(1_786_352_400_000).unwrap();
+        let due = IcsTime::Zoned {
+            dt: jiff::civil::date(2026, 9, 11).at(15, 30, 0, 0),
+            tzid: "Europe/Sofia".to_string(),
+        };
+        let ics = new_todo_ics("new-2", "Call", Some(&due), now);
+        assert!(ics.contains("DUE;TZID=Europe/Sofia:20260911T153000"), "{ics}");
+        assert!(ics.contains("DTSTART;TZID=Europe/Sofia:20260911T153000"), "{ics}");
+
+        let t = &todos_in(&parse(&ics).unwrap())[0];
+        let (ms, _, all_day) = resolve(t.due.as_ref().unwrap(), "Europe/Sofia").unwrap();
+        assert!(!all_day, "a timed due must not read back as a date");
+        assert_eq!(
+            ms,
+            "2026-09-11T15:30:00+03:00[Europe/Sofia]".parse::<jiff::Zoned>().unwrap().timestamp().as_millisecond()
+        );
     }
 
     /// An invitation resource the way iCloud actually ships one: the user's

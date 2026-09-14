@@ -1290,6 +1290,44 @@ test.describe('App', () => {
       expect(args.scope).toBe('following');
     });
 
+    /**
+     * **CalDAV mails nobody, so a drag there never offers to.** 'Book club'
+     * has an attendee and does not repeat: on Google that is the notify
+     * question, on CalDAV there is nothing to ask and it moves at once, the
+     * same silence the form's Save keeps on that provider.
+     */
+    test('a CalDAV one-off with attendees moves without asking', async ({ page }) => {
+      await writable(page);
+      await dragBy(page, 'Book club', 60);
+
+      await expect.poll(() => callsTo(page, 'update_event')).toHaveLength(1);
+      await expect(movePanel(page)).toBeHidden();
+      const [args] = await callsTo(page, 'update_event');
+      expect(args.sendUpdates).toBe('none');
+    });
+
+    /** A CalDAV series still asks which occurrences — and nothing else: no
+     *  notify buttons, and no Google own-copy notice although somebody else
+     *  organizes it. */
+    test('a CalDAV series with attendees asks the scope and offers no email', async ({ page }) => {
+      await writable(page);
+      await dragBy(page, 'Choir', 60);
+
+      await expect(movePanel(page)).toBeVisible();
+      await expect(movePanel(page).getByRole('radiogroup', { name: 'Move' })).toBeVisible();
+      await expect(page.getByTestId('move-guest-notice')).toHaveCount(0);
+      await expect(page.getByTestId('move-own-copy-notice')).toHaveCount(0);
+      await expect(
+        movePanel(page).getByRole('button', { name: 'Move and notify guests' }),
+      ).toHaveCount(0);
+      await expect(movePanel(page).getByRole('button', { name: 'Move my copy' })).toHaveCount(0);
+
+      await movePanel(page).getByRole('button', { name: 'Move', exact: true }).click();
+      await expect.poll(() => callsTo(page, 'update_event')).toHaveLength(1);
+      const [args] = await callsTo(page, 'update_event');
+      expect(args.sendUpdates).toBe('none');
+    });
+
     /** Escape closes a confirmation and writes nothing — the same key that
      *  closes everything else here, and the same guarantee as Cancel. */
     test('Escape closes the dialog and issues no request', async ({ page }) => {

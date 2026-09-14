@@ -74,8 +74,9 @@ pub struct EventDetail {
     pub self_response: Option<String>,
     pub can_respond: bool,
     pub can_edit: bool,
-    /// Whether this is the user's own event — Google's `organizer.self`,
-    /// derived by [`is_organizer`]. Not an edit gate: `can_edit` is the
+    /// Whether this is the user's own event — Google's `organizer.self`, or
+    /// no organizer stated at all, derived by [`owns_event`]. Not an edit
+    /// gate: `can_edit` is the
     /// calendar's, and a guest may edit their own copy of an invitation.
     /// What it decides is *what an edit reaches*: the organizer's change
     /// goes to everyone, a guest's stays on their copy unless
@@ -85,6 +86,13 @@ pub struct EventDetail {
     /// Google's `guestsCanModify`: the organizer let guests change the event
     /// for everyone. Meaningful only when `is_organizer` is false.
     pub guests_can_modify: bool,
+    /// Whether this event's provider emails the people on it when a write
+    /// asks it to. Google does, because Google is the mail server; CalDAV
+    /// has nothing of the kind in the protocol OmaCal speaks, so a notify
+    /// choice or "guests are told by email" there is a promise nobody keeps.
+    /// The move and delete dialogs read it; the form reads the same fact off
+    /// the selected calendar's provider, since a create has no detail.
+    pub mails_guests: bool,
     pub attendees: Vec<omacal_store::Attendee>,
     /// What this event asks for: the calendar's defaults, or its own
     /// overrides — the store's shape, unconverted (reminders spec §3).
@@ -134,6 +142,33 @@ pub(crate) fn is_organizer(
         (!account_email.is_empty() && o.eq_ignore_ascii_case(account_email))
             || (!calendar_google_id.is_empty() && o.eq_ignore_ascii_case(calendar_google_id))
     })
+}
+
+/// Whether a change to this event is the user's to make for everyone —
+/// the fact [`Reach`] and the app's move, save and delete dialogs read.
+/// [`is_organizer`], **or no organizer stated at all.**
+///
+/// An event nobody organizes was never sent to anyone: scheduling starts at
+/// `ORGANIZER`, so there is no organizer's copy for the user's to be apart
+/// from. That is every event OmaCal creates on CalDAV (it deliberately writes
+/// no `ORGANIZER`, since that is what a scheduling server keys mail on) and
+/// most events any CalDAV client keeps for itself. Google states an organizer
+/// on every live event; the only rows it leaves without one are the stubs of
+/// cancelled occurrences (checked against a real store: 31 of 891, all of
+/// them), which are suppressed and never reach a dialog, so nothing there
+/// moves. Issue #101: a CalDAV series one person uses alone was met with
+/// "You are a guest on this event… Google tells the organizer you declined".
+///
+/// [`is_organizer`] itself stays strict, because the CLI's `organizer`
+/// column reports the address comparison and documents unstated as "not a
+/// claim" either way.
+pub(crate) fn owns_event(
+    organizer_email: Option<&str>,
+    account_email: &str,
+    calendar_google_id: &str,
+) -> bool {
+    organizer_email.is_none_or(|o| o.trim().is_empty())
+        || is_organizer(organizer_email, account_email, calendar_google_id)
 }
 
 /// Who a change to an event reaches — the fact the CLI's `show` reports
@@ -243,7 +278,8 @@ pub(crate) async fn event_detail_impl(state: &AppState, id: i64) -> anyhow::Resu
         event.recurrence.as_deref(), event.is_all_day, &event.start_tz,
     );
     // Before the literal below moves `organizer_email` into the detail.
-    let is_organizer = is_organizer(event.organizer_email.as_deref(), &account_email, &cal_google_id);
+    let is_organizer = owns_event(event.organizer_email.as_deref(), &account_email, &cal_google_id);
+    let mails_guests = !crate::caldav_write::is_caldav_calendar(&state.pool, event.calendar_id).await?;
     Ok(EventDetail {
         id: event.id,
         calendar_id: event.calendar_id,
@@ -269,6 +305,7 @@ pub(crate) async fn event_detail_impl(state: &AppState, id: i64) -> anyhow::Resu
         can_edit: can_edit(state.demo, &access_role),
         is_organizer,
         guests_can_modify: event.guests_can_modify,
+        mails_guests,
         attendees: event.attendees,
         reminders: event.reminders,
         calendar_default_reminders: event.calendar_default_reminders,
@@ -2833,6 +2870,22 @@ mod tests {
         assert!(!is_organizer(None, "me@x.com", "me@x.com"), "no organizer is not a claim");
         assert!(!is_organizer(Some(""), "", ""), "empty strings never match each other");
     }
+
+    /// Issue #101: what a change reaches is the user's own event when they
+    /// organize it *or nobody does*, and a guest's copy only when somebody
+    /// else is named. The strict comparison above is unchanged underneath.
+    #[test]
+    fn an_event_nobody_organizes_is_the_users_own() {
+        assert!(owns_event(None, "me@x.com", "https://dav.example/cal/"), "a CalDAV event OmaCal wrote");
+        assert!(owns_event(Some("  "), "me@x.com", ""), "a blank ORGANIZER states nobody");
+        assert!(owns_event(Some("me@x.com"), "me@x.com", ""), "still the organizer");
+        assert!(!owns_event(Some("ana@x.com"), "me@x.com", "me@x.com"), "still a guest");
+        assert_eq!(
+            Reach::of(owns_event(None, "me@x.com", ""), false),
+            Reach::Organizer,
+            "never own-copy, whatever guestsCanModify says"
+        );
+    }
     use omacal_store::Attendee;
 
     fn guest(is_self: bool) -> Attendee {
@@ -4015,7 +4068,7 @@ mod tests {
             "is_all_day", "is_recurring", "is_series_exception", "recurrence", "repeat", "weekly_days",
             "repeat_end", "color",
             "organizer_email", "self_response", "can_respond", "can_edit", "is_organizer", "guests_can_modify",
-            "attendees", "reminders", "calendar_default_reminders",
+            "mails_guests", "attendees", "reminders", "calendar_default_reminders",
         ];
         expected.sort_unstable();
         assert_eq!(keys, expected, "the UI reads these by name off `invoke`'s result");
@@ -4045,6 +4098,22 @@ mod tests {
                 "the UI's `Attendee` reads `{name}`, which is not on the wire under that name"
             );
         }
+    }
+
+    /// `mails_guests` follows the owning account's provider, and only that:
+    /// the same row reads `true` on a Google account and `false` once the
+    /// account is CalDAV. The move and delete dialogs stop offering to email
+    /// anybody on the strength of this one field.
+    #[tokio::test]
+    async fn only_a_google_event_says_it_mails_its_guests() {
+        let mut ev = all_day_row("2026-08-10", "2026-08-11", "Europe/Lisbon");
+        ev.attendees = vec![guest(false)];
+        let (pool, id) = seeded_pool_on_cal(&mut ev, "Europe/Lisbon").await;
+        let state = state_with(pool, false);
+        assert!(event_detail_impl(&state, id).await.unwrap().mails_guests, "Google mails");
+
+        sqlx::query("UPDATE accounts SET provider = 'caldav'").execute(&state.pool).await.unwrap();
+        assert!(!event_detail_impl(&state, id).await.unwrap().mails_guests, "CalDAV does not");
     }
 
     /// `respond_impl`'s own `can_respond(state.demo, …)` — the second demo

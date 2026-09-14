@@ -34,12 +34,20 @@
    *  — the same exclusion `DeleteConfirm` and `mailableGuests` make, and for
    *  the same reason: telling somebody they are about to notify themselves is
    *  just wrong. */
-  const guests = $derived(detail.attendees.filter((a) => !a.is_self).length);
+  const guests = $derived(
+    // CalDAV mails nobody, so there is nobody the move *could* email and the
+    // notify choice is not offered — the rule the form's Save already keeps.
+    detail.mails_guests ? detail.attendees.filter((a) => !a.is_self).length : 0,
+  );
   const title = $derived(detail.title ?? '(no title)');
   /** Who the move reaches — see `editReach`. A guest's move of their own copy
    *  has nobody to notify, however many people are on the event, so the
    *  notify choice is not offered and the panel says why instead. */
   const reach = $derived(editReach(detail));
+  /** The own-copy notice is Google's documented behaviour, so it is said on
+   *  Google only; on CalDAV whether anyone else's copy moves is the server's
+   *  business, and a series there gets the plain Move. */
+  const ownCopy = $derived(detail.mails_guests && reach === 'own-copy');
   const organizer = $derived(detail.organizer_email ?? 'the organizer');
 </script>
 
@@ -96,7 +104,7 @@
       </div>
     {/if}
 
-    {#if reach === 'own-copy'}
+    {#if ownCopy}
       <!-- Google keeps a guest's copy apart from the organizer's: the moved
            time lands on this calendar alone, and nobody else's changes. Said
            here, before the write, because the drag itself looks exactly like
@@ -118,7 +126,7 @@
 
   {#snippet actions()}
     <button type="button" class="ghost" data-cancel onclick={oncancel}>Cancel</button>
-    {#if reach === 'own-copy'}
+    {#if ownCopy}
       <!-- Nobody to tell: the write is to this calendar's copy alone, so the
            only honest button names that. `none` because there is no mail to
            send, not because the user declined to send it. -->
