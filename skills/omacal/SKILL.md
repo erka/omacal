@@ -54,6 +54,9 @@ or `shared` (a guest, but the organizer lets guests change it for
 everyone), plus `guestsCanModify`. **Read `reach` before promising the
 user that a reschedule will move the meeting for the other people** — on
 `own-copy` it will not; tell them to ask the organizer instead.
+`mailsGuests` (v3.7.2+) is false on a CalDAV calendar: OmaCal emails
+nobody there, so there is no notify question to ask the user, and `reach`
+is Google's model and says nothing reliable about who else sees a change.
 
 ## Writing (requires the app to be running; omacal v0.7+)
 
@@ -87,14 +90,16 @@ omacal events respond 41 yes --json          # yes | maybe | no
   refuses to guess which occurrences you mean. Ask the user if unclear.
 - **An event with guests requires `--notify all|none`** — whether the
   guests get emailed about the change is the user's call, never yours.
-  Ask the user rather than defaulting. **Exception: `reach` = `own-copy`**
-  (`events show`): an update moves the user's own copy alone and nobody
-  can be notified, so `--notify` is not required there and `--notify all`
-  is refused with the reason (exit 6). `delete` on an own-copy event
-  removes it from the user's calendar only — Google tells the organizer
-  they declined — and still takes `--notify all|none` for that notice.
+  Ask the user rather than defaulting. **Two exceptions, both refused
+  with the reason (exit 2) if you pass `--notify all`:** `reach` =
+  `own-copy` (`events show`), where an update moves the user's own copy
+  alone and nobody can be notified; and **`mailsGuests` = false (CalDAV)**,
+  where OmaCal emails nobody at all. Neither needs `--notify`.
+- `delete` takes no `--notify`. On Google it tells the guests, or for an
+  own-copy event it removes the event from the user's calendar only and
+  Google tells the organizer they declined. On CalDAV OmaCal emails nobody.
 - `--guest a@b` repeats for multiple guests on create. Creating with
-  guests also requires `--notify`.
+  guests also requires `--notify`, except on a CalDAV calendar.
 - **`--repeat daily|weekdays|weekly|monthly|yearly` makes one series instead
   of many events.** Reach for it whenever the user describes a routine —
   "every Tuesday", "each weekday" — because a series is edited and deleted
