@@ -4762,12 +4762,17 @@ test.describe('App: week panning', () => {
     await page.evaluate(async () => {
       const body = document.querySelector('[data-testid="week-body"]')!;
       const r = body.getBoundingClientRect();
+      // Spaced by a busy-wait, not `setTimeout`: CI's timers stretched an 8ms
+      // sleep enough to drop the swipe under the strong speed (2 px/ms), and
+      // it glided nine days instead of paging seven. The speed is what this
+      // spec is about, so it must not depend on the runner's timer slack.
       for (let i = 0; i < 4; i++) {
         body.dispatchEvent(new WheelEvent('wheel', {
           deltaX: 60, deltaY: 0, clientX: r.left + r.width / 2, clientY: r.top + 100,
           bubbles: true, cancelable: true,
         }));
-        await new Promise((res) => setTimeout(res, 8));
+        const t = performance.now();
+        while (performance.now() - t < 8) { /* busy-wait: exact spacing */ }
       }
     });
     await expect(page.locator('.col')).toHaveCount(7);
