@@ -201,6 +201,10 @@ export type AppSettings = {
    *  the Omarchy widget's location or the IP), because this is the one
    *  network destination beyond the calendar providers. */
   weatherEnabled: boolean;
+  /** Whether the Location field asks Photon for place suggestions. Off
+   *  until chosen — typed text leaves the machine, and Photon's public
+   *  server asks for light personal use. History stays on either way. */
+  photonPlaces: boolean;
   /** Whether the forecast high is drawn in Celsius or Fahrenheit — Celsius by
    *  default. Read by `WeekGrid` and `Filmstrip` through the
    *  `tempunit.svelte.ts` rune, for `timeFormat`'s reason: both print a
@@ -273,6 +277,11 @@ export const setStartOnLogin = (mode: StartOnLogin) =>
  *  so the headers change while the modal is still open. */
 export const setWeatherEnabled = (on: boolean) =>
   invoke<AppSettings>('set_weather_enabled', { on });
+
+/** Stores whether Photon may be queried from Location. History suggestions
+ *  ignore this — they never leave the machine. */
+export const setPhotonPlaces = (on: boolean) =>
+  invoke<AppSettings>('set_photon_places', { on });
 
 /** Stores the temperature unit. Nothing is refetched: the cache is already
  *  unrounded Celsius regardless of this setting, so the headers just round

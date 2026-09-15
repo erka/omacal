@@ -646,6 +646,7 @@ type StubSettings = {
   displayTimezone: string | null;
   secondTimezone: string | null;
   weatherEnabled: boolean;
+  photonPlaces: boolean;
   temperatureUnit: TemperatureUnit;
   startOnLogin: StartOnLogin;
   quitOnClose: boolean;
@@ -717,6 +718,9 @@ const DEFAULT_SETTINGS: StubSettings = {
   secondTimezone: null,
   // The backend's default: on unless somebody turned it off.
   weatherEnabled: true,
+  // Off until asked: typed locations do not leave the machine on a
+  // fresh install, and Photon's public server asks for light use.
+  photonPlaces: false,
   // The backend's default: Celsius, so no installed copy changes under its user.
   temperatureUnit: 'celsius',
   // The backend's default too, and for a reason the stub has to reproduce
@@ -1005,6 +1009,9 @@ export function installTauriStub(scenario: string): Harness {
       case 'set_weather_enabled':
         settings = saveSettings({ ...settings, weatherEnabled: args.on as boolean });
         return { ...settings };
+      case 'set_photon_places':
+        settings = saveSettings({ ...settings, photonPlaces: args.on as boolean });
+        return { ...settings };
       case 'set_temperature_unit':
         settings = saveSettings({ ...settings, temperatureUnit: args.unit as TemperatureUnit });
         return { ...settings };
@@ -1151,6 +1158,18 @@ export function installTauriStub(scenario: string): Harness {
           { email: 'iskren.h@x3me.net', display_name: 'Iskren Hadzhinedev', met: 12 },
           { email: 'eva.m@x3me.net', display_name: null, met: 5 },
         ];
+      // Location autocomplete. Banbury / Room 4A collide with nothing other
+      // specs type into Location (empty or Zoom URLs in quick-add).
+      case 'search_places': {
+        const q = String(args.query ?? '').trim().toLowerCase();
+        if (q.length < 2) return [];
+        const corpus = [
+          { label: 'Banbury Golf Course, 2626 South Marypost Place, Eagle, Idaho 83616, United States',
+            lat: 43.67, lon: -116.36, source: 'search' },
+          { label: 'Room 4A', lat: null, lon: null, source: 'history' },
+        ];
+        return corpus.filter((h) => h.label.toLowerCase().includes(q));
+      }
       case 'dismiss_change_notice':
         return null;
       case 'dismiss_all_change_notices':

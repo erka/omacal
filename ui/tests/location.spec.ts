@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { locationLabel, meetingProvider, meetingUrl } from '../src/lib/location';
+import { containsHttpUrl, locationLabel, meetingProvider, meetingUrl } from '../src/lib/location';
 
 test.describe('locationLabel', () => {
   test('a plain place is left alone', () => {
@@ -146,5 +146,19 @@ test.describe('meetingUrl', () => {
     expect(
       meetingUrl('Agenda: https://docs.example.com/agenda then join at https://us02web.zoom.us/j/123'),
     ).toBe('https://us02web.zoom.us/j/123');
+  });
+});
+
+/** Photon must not be queried with a Location that holds a URL — meeting
+ *  passcodes and map pins alike. This is the any-http detector, not the
+ *  provider allow-list `meetingUrl` uses for Join. */
+test.describe('containsHttpUrl', () => {
+  test('an http or https URL anywhere in the text is detected', () => {
+    expect(containsHttpUrl('https://us02web.zoom.us/j/123?pwd=secret')).toBe(true);
+    expect(containsHttpUrl('Join at HTTP://meet.google.com/abc')).toBe(true);
+    expect(containsHttpUrl('Room 4A, https://maps.example.com/pin')).toBe(true);
+    expect(containsHttpUrl('Room 4A')).toBe(false);
+    expect(containsHttpUrl('http')).toBe(false);
+    expect(containsHttpUrl(null)).toBe(false);
   });
 });

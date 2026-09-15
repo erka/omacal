@@ -24,7 +24,7 @@
     setDisplayTimezone, setFallbackReminders, setNotificationsEnabled,
     setAppearance, APPEARANCE_OPTIONS,
     setQuitOnClose, setSecondTimezone, setSyncInterval, setTemperatureUnit, setTimeFormat,
-    setMenubarLabelFormat, setMenubarDateFormat, setMenubarPreferences, setMenubarSections, setShowDate, setTrayIcon, setWeatherEnabled, setWeekStart,
+    setMenubarLabelFormat, setMenubarDateFormat, setMenubarPreferences, setMenubarSections, setShowDate, setTrayIcon, setPhotonPlaces, setWeatherEnabled, setWeekStart,
     setWeekStartsToday, setWeekViewDays, setVisibleHours,
     type AppSettings, type Appearance, type StartOnLogin, type WeekViewDays,
     type WindowFrame, WINDOW_FRAME_OPTIONS, setWindowFrame,
@@ -542,6 +542,17 @@
     note = null;
     try {
       settings = await setWeatherEnabled(on);
+      if (settings) onsettingschange?.(settings);
+    } catch (e) {
+      note = { text: String(e), kind: 'error' };
+      settings = settings ? { ...settings } : null;
+    }
+  }
+
+  async function togglePhotonPlaces(on: boolean) {
+    note = null;
+    try {
+      settings = await setPhotonPlaces(on);
       if (settings) onsettingschange?.(settings);
     } catch (e) {
       note = { text: String(e), kind: 'error' };
@@ -1299,6 +1310,21 @@
         {#if settings?.desktop === 'omarchy'}The location uses your Omarchy weather widget setting when available, otherwise your IP address.
         {:else}The location comes from your IP address.{/if}
         Turning this off stops forecast requests.
+      </p>
+
+      <label class="check section-start">
+        <input
+          type="checkbox"
+          checked={settings?.photonPlaces ?? false}
+          disabled={!settings}
+          onchange={(e) => togglePhotonPlaces(e.currentTarget.checked)}
+        />
+        Suggest places from OpenStreetMap (Photon)
+      </label>
+      <p class="hint">
+        Sends what you type to photon.komoot.io. Recent locations stay on
+        this machine either way. Photon's public server asks for light
+        personal use.
       </p>
 
       {#if settings?.weatherEnabled}

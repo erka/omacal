@@ -30,8 +30,8 @@ pub use tasks::{
 pub use events::{
     delete_event, delete_series, event_by_id, event_for_detail, event_for_write, events_in_window,
     exceptions_from,
-    known_guests, move_series_to_calendar, search_events, upsert_event, Attendee, KnownGuest,
-    Reminder, Reminders, StoredEvent,
+    known_guests, known_locations, move_series_to_calendar, search_events, upsert_event, Attendee,
+    KnownGuest, KnownLocation, Reminder, Reminders, StoredEvent,
 };
 
 /// Opens an existing database read-only: no create, no migrations, no

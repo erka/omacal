@@ -72,6 +72,16 @@ export function meetingProvider(raw: string | null): string | null {
  * into a sentence ("dial in at https://…/j/123.") otherwise carries the full
  * stop into the URL and 404s.
  */
+/** Whether `raw` holds any `http://` or `https://` URL.
+ *
+ *  Broader than `meetingUrl`: a map pin and a Zoom passcode are both
+ *  things Photon must not be queried with. The character class matches
+ *  `URL_RE`, so a string `locationLabel` would treat as a link is a
+ *  string this treats as one too. */
+export function containsHttpUrl(raw: string | null): boolean {
+  return URL_RE.test(raw ?? '');
+}
+
 export function meetingUrl(raw: string | null): string | null {
   const text = (raw ?? '').trim();
   if (!text) return null;

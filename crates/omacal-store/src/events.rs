@@ -582,6 +582,43 @@ pub async fn known_guests(pool: &SqlitePool) -> anyhow::Result<Vec<KnownGuest>> 
         .collect())
 }
 
+/// One distinct location string the user has already saved — the Location
+/// field's local autocomplete corpus, most-recent first.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnownLocation {
+    pub label: String,
+    pub used: i64,
+    pub last_utc: i64,
+}
+
+/// Distinct non-blank `events.location` values, most recently used first.
+/// Cancelled one-offs are dropped the same way `events_in_window` drops them
+/// — they are not places the user still has; a cancelled exception stays
+/// because it is the record of a slot, and its location is still a place
+/// they went.
+pub async fn known_locations(pool: &SqlitePool) -> anyhow::Result<Vec<KnownLocation>> {
+    let rows = sqlx::query(
+        "SELECT location AS label, MAX(start_utc) AS last_utc, COUNT(*) AS used
+           FROM events
+          WHERE location IS NOT NULL
+            AND TRIM(location) != ''
+            AND (status != 'cancelled' OR recurring_event_id IS NOT NULL)
+          GROUP BY location
+          ORDER BY last_utc DESC
+          LIMIT 50",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|r| KnownLocation {
+            label: r.get("label"),
+            used: r.get("used"),
+            last_utc: r.get("last_utc"),
+        })
+        .collect())
+}
+
 pub async fn search_events(pool: &SqlitePool, query: &str) -> anyhow::Result<Vec<StoredEvent>> {
     // `\` as the escape character, applied to the two wildcards and to itself
     // — escaping `%` and `_` while leaving a literal backslash unescaped would
@@ -820,6 +857,42 @@ mod tests {
             ],
             "deduped and case-folded, name backfilled, room and self excluded",
         );
+    }
+
+    /// Distinct strings, most recently used first: two Banbury rows collapse
+    /// to one, a blank is not a place, and a cancelled one-off is gone.
+    #[tokio::test]
+    async fn known_locations_are_distinct_most_recent_first() {
+        let pool = connect_memory().await.unwrap();
+        seed(&pool).await;
+
+        const BANBURY: &str = "Banbury Golf Course, 2626 South Marypost Place, Eagle, Idaho 83616, United States";
+        let mut a = ev(1, "loc1", 1_000, 2_000);
+        a.location = Some(BANBURY.into());
+        upsert_event(&pool, &a).await.unwrap();
+        let mut b = ev(1, "loc2", 9_000, 10_000);
+        b.location = Some(BANBURY.into());
+        upsert_event(&pool, &b).await.unwrap();
+        let mut c = ev(1, "loc3", 3_000, 4_000);
+        c.location = Some("Room 4A".into());
+        upsert_event(&pool, &c).await.unwrap();
+        let mut blank = ev(1, "loc4", 8_000, 9_000);
+        blank.location = Some("  ".into());
+        upsert_event(&pool, &blank).await.unwrap();
+        let mut cancelled = ev(1, "loc5", 20_000, 21_000);
+        cancelled.location = Some("Ghost hall".into());
+        cancelled.status = "cancelled".into();
+        upsert_event(&pool, &cancelled).await.unwrap();
+
+        let hits = known_locations(&pool).await.unwrap();
+        assert_eq!(
+            hits.iter().map(|h| h.label.as_str()).collect::<Vec<_>>(),
+            vec![BANBURY, "Room 4A"],
+        );
+        assert_eq!(hits[0].used, 2);
+        assert_eq!(hits[0].last_utc, 9_000);
+        assert!(hits.iter().all(|h| !h.label.trim().is_empty()));
+        assert_eq!(hits.iter().filter(|h| h.label == BANBURY).count(), 1);
     }
 
     /// Every clause of `exceptions_from` in one fixture, because each of them

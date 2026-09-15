@@ -14,6 +14,7 @@ mod errors;
 mod events;
 mod export;
 mod fixtures;
+mod geocode;
 /// Test-only: the golden-file mechanism the UI fixtures read. Gated so nothing
 /// that reads or writes `ui/tests/` is compiled into the shipped app.
 #[cfg(test)]
@@ -1701,6 +1702,7 @@ pub fn run() {
             calendars::set_calendar_label,
             search::search_events,
             events::known_guests,
+            geocode::search_places,
             settings::get_settings,
             settings::set_sync_interval,
             settings::set_notifications_enabled,
@@ -1710,6 +1712,7 @@ pub fn run() {
             settings::set_window_frame,
             settings::set_start_on_login,
             settings::set_weather_enabled,
+            settings::set_photon_places,
             settings::set_display_timezone,
             settings::set_second_timezone,
             settings::list_timezones,

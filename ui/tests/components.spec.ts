@@ -1480,6 +1480,25 @@ test.describe('Header', () => {
     expect(call.args).toMatchObject({ on: false });
   });
 
+  /** Photon (PR #125 review): off until asked, because the query leaves
+   *  the machine, and Photon's public server asks for light personal use.
+   *  History suggestions do not go through this switch. */
+  test('Appearance carries Photon place suggestions, off by default and saved on', async ({ page }) => {
+    await page.goto(show('Header', 'connected'));
+    const modal = await openSettings(page, 'Appearance');
+
+    const toggle = modal.getByRole('checkbox', {
+      name: 'Suggest places from OpenStreetMap (Photon)',
+    });
+    await expect(toggle).not.toBeChecked();
+    await toggle.check();
+    await expect(toggle).toBeChecked();
+
+    const calls = await page.evaluate(() => (window as any).__harness.calls);
+    const call = calls.find((c: any) => c.cmd === 'set_photon_places');
+    expect(call.args).toMatchObject({ on: true });
+  });
+
   /**
    * Start-on-login (issue #22, and the background mode asked for alongside
    * it): the app used to register its launch entry on every single start, so
@@ -4318,6 +4337,96 @@ test.describe('EventForm', () => {
     // Not `eva.m@x3me.net`: what was typed is itself an address.
     await expect(page.locator('[data-guest="eva.m@x3me.ne"]')).toHaveCount(1);
     await expect(page.locator('[data-guest="eva.m@x3me.net"]')).toHaveCount(0);
+  });
+
+  const BANBURY =
+    'Banbury Golf Course, 2626 South Marypost Place, Eagle, Idaho 83616, United States';
+
+  test('typing a place fragment offers Photon-shaped hits, and a click fills the address', async ({ page }) => {
+    await open(page, 'create');
+    await page.getByLabel('Location').fill('Ba');
+    const list = page.getByRole('listbox', { name: 'Places' });
+    await expect(list).toBeVisible();
+    await list.getByRole('option', { name: BANBURY }).click();
+    await expect(page.getByLabel('Location')).toHaveValue(BANBURY);
+    await expect(list).toHaveCount(0);
+  });
+
+  test('ArrowDown and Enter fill the highlighted place, and do not save', async ({ page }) => {
+    await open(page, 'create');
+    const input = page.getByLabel('Location');
+    await input.fill('Ba');
+    const list = page.getByRole('listbox', { name: 'Places' });
+    await expect(list).toBeVisible();
+    await input.press('ArrowDown');
+    await input.press('Enter');
+    await expect(input).toHaveValue(BANBURY);
+    expect(await saves(page)).toEqual([]);
+    await expect(page.locator('.pop')).toBeVisible();
+  });
+
+  test('Escape closes the place list and leaves the fragment; the form stays open', async ({ page }) => {
+    await open(page, 'create');
+    const input = page.getByLabel('Location');
+    await input.fill('Ba');
+    const list = page.getByRole('listbox', { name: 'Places' });
+    await expect(list).toBeVisible();
+    await input.press('Escape');
+    await expect(list).toHaveCount(0);
+    await expect(input).toHaveValue('Ba');
+    await expect(page.locator('.pop')).toBeVisible();
+  });
+
+  test('a query with no hits shows no list; the typed text remains; Create still works', async ({ page }) => {
+    await open(page, 'create');
+    const input = page.getByLabel('Location');
+    await input.fill('zzzznowhere');
+    await expect(page.getByRole('listbox', { name: 'Places' })).toHaveCount(0);
+    await expect(input).toHaveValue('zzzznowhere');
+    await page.getByRole('button', { name: 'Create' }).click();
+    const [saved] = await saves(page);
+    expect(saved.fields.location).toBe('zzzznowhere');
+  });
+
+  test('plain Enter in Location saves when no suggestion is picked', async ({ page }) => {
+    // The handler used to preventDefault every unmodified Enter, so a
+    // Location field with no list swallowed the key that should Create.
+    await open(page, 'create');
+    const input = page.getByLabel('Location');
+    await input.fill('zzzznowhere');
+    await expect(page.getByRole('listbox', { name: 'Places' })).toHaveCount(0);
+    await input.press('Enter');
+    const [saved] = await saves(page);
+    expect(saved.fields.location).toBe('zzzznowhere');
+  });
+
+  test('opening edit on a filled location does not search', async ({ page }) => {
+    // The $effect used to read value.location, so 300 ms after open the
+    // saved place went to search_places — and from there to Photon —
+    // without a keystroke. 400 ms is the debounce plus a margin; this
+    // is testing the absence of a timed hop, not guessing at layout.
+    await open(page, 'edit-with-place');
+    await expect(page.getByLabel('Location')).toHaveValue('Room 4A');
+    await expect(page.getByRole('listbox', { name: 'Places' })).toHaveCount(0);
+    await page.waitForTimeout(400);
+    await expect(page.getByRole('listbox', { name: 'Places' })).toHaveCount(0);
+    const n = await page.evaluate(() =>
+      (window as any).__harness.calls.filter((c: any) => c.cmd === 'search_places').length);
+    expect(n).toBe(0);
+  });
+
+  test('a meeting URL typed into Location is not sent to search_places', async ({ page }) => {
+    // Passcodes live in the query string. The typed text can still be
+    // saved; it must not leave the machine as a Photon query.
+    await open(page, 'create');
+    const input = page.getByLabel('Location');
+    await input.fill('https://us02web.zoom.us/j/123?pwd=secret');
+    await page.waitForTimeout(400);
+    const queries = await page.evaluate(() =>
+      (window as any).__harness.calls
+        .filter((c: any) => c.cmd === 'search_places')
+        .map((c: any) => c.args.query));
+    expect(queries).toEqual([]);
   });
 
   /** The time fields speak the app's clock, not the engine's: they are
