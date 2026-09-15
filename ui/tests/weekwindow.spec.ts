@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import type { WeekPayload } from '../src/lib/api';
 import {
-  FLING_TAU_MS, flingProgress, flingTravel, packBandLanes, padFor, panCommit, sliceWeek, snapPlan,
+  FLING_MIN_V, FLING_TAU_MS, packBandLanes, padFor, panCommit, settleTarget, sliceWeek, springAt, springPlan,
   velocityOf, visibleIndex, windowHeld,
 } from '../src/lib/weekwindow';
 
@@ -145,11 +145,13 @@ test.describe('the window on a padded week', () => {
     expect(panCommit(0.9)).toEqual({ shift: 0, rest: 0.9 });
   });
 
-  test('the fingers lifting settle on the nearest column, and one more past half', () => {
-    expect(snapPlan(0.3)).toEqual({ shift: 0, from: expect.closeTo(0.3, 9) });
-    expect(snapPlan(0.6)).toEqual({ shift: -1, from: expect.closeTo(-0.4, 9) });
-    expect(snapPlan(-0.6)).toEqual({ shift: 1, from: expect.closeTo(0.4, 9) });
-    expect(snapPlan(0)).toEqual({ shift: 0, from: 0 });
+  test('a pan that stops settles on the nearest column, one more past half', () => {
+    const o = { pager: false, minV: FLING_MIN_V, cap: 6 };
+    expect(settleTarget(0.3, 0, o)).toBe(0);
+    expect(settleTarget(0.6, 0, o)).toBe(1);
+    expect(settleTarget(-0.6, 0, o)).toBe(-1);
+    expect(settleTarget(2.4, 0, o)).toBe(2);
+    expect(settleTarget(0, 0, o)).toBe(0);
   });
 });
 
@@ -181,15 +183,68 @@ test.describe('the pan\'s feel: what waits, and what flies', () => {
     expect(velocityOf([])).toBe(0);
   });
 
-  test('a stop settles at once, a flick travels with its speed, and never past the padding', () => {
-    expect(flingTravel(0.001)).toBe(0);
-    expect(flingTravel(0.005)).toBeCloseTo(2, 9);   // 5 col/s × 0.4s
-    expect(flingTravel(-0.005)).toBeCloseTo(-2, 9);
-    expect(flingTravel(0.1)).toBe(6);
-    expect(flingTravel(-0.1)).toBe(-6);
-    // The glide's shape: nothing at lift, all of it eventually, 63% at τ.
-    expect(flingProgress(0)).toBe(0);
-    expect(flingProgress(FLING_TAU_MS)).toBeCloseTo(1 - Math.exp(-1), 9);
-    expect(flingProgress(FLING_TAU_MS * 10)).toBeCloseTo(1, 4);
+  test('a flick travels with its speed, and never further than the padding allows', () => {
+    const o = { pager: false, minV: FLING_MIN_V, cap: 6 };
+    // Below the flick speed: the nearest column, as if it had stopped.
+    expect(settleTarget(0.2, 0.001, o)).toBe(0);
+    // 5 columns/s projected for 0.4 s is two more.
+    expect(settleTarget(0.2, 0.005, o)).toBe(2);
+    expect(settleTarget(-0.2, -0.005, o)).toBe(-2);
+    // Capped either side of where the fingers left it.
+    expect(settleTarget(0, 0.1, o)).toBe(6);
+    expect(settleTarget(3, -0.1, o)).toBe(-3);
+    expect(settleTarget(0, 0.1, { ...o, cap: 2 })).toBe(2);
+    expect(FLING_TAU_MS).toBe(400);
+  });
+
+  test('Day view under a finger moves one page per swipe, the way the flick points (#127)', () => {
+    const o = { pager: true, minV: 0.0002, cap: 2 };
+    // A flick from a little way in goes on to the next page...
+    expect(settleTarget(0.2, 0.001, o)).toBe(1);
+    expect(settleTarget(-0.2, -0.001, o)).toBe(-1);
+    // ...even from barely started, and back where it came from if flicked back.
+    expect(settleTarget(0, 0.001, o)).toBe(1);
+    expect(settleTarget(0.4, -0.001, o)).toBe(0);
+    // Never more than one page, however hard or however far.
+    expect(settleTarget(0.2, 0.5, o)).toBe(1);
+    expect(settleTarget(1.6, 0.01, o)).toBe(1);
+    expect(settleTarget(1, 0.01, o)).toBe(1);
+    // No flick: the nearer page.
+    expect(settleTarget(0.4, 0, o)).toBe(0);
+    expect(settleTarget(0.7, 0.0001, o)).toBe(1);
+    expect(settleTarget(-0.7, 0, o)).toBe(-1);
+  });
+
+  test('the settle is one spring: it keeps the speed it was given, lands exactly, and never overshoots', () => {
+    const run = (from: number, target: number, v: number) => {
+      const p = springPlan(from, target, v);
+      const xs: number[] = [];
+      let last = springAt(p, 0);
+      for (let t = 0; t <= 2100 && !last.done; t += 4) { last = springAt(p, t); xs.push(last.x); }
+      return { p, xs, last };
+    };
+    // From a standstill it rests on the target within half a second.
+    const still = run(0.4, 0, 0);
+    expect(still.last.done).toBe(true);
+    expect(still.last.x).toBe(0);
+    expect(still.xs.length * 4).toBeLessThan(500);
+    // A speed toward the target is carried: the first instant moves with it.
+    const flick = springPlan(0.2, 1, 0.01);
+    expect(springAt(flick, 0).v).toBeCloseTo(0.01, 9);
+    // A hard flick stiffens the spring rather than shooting past.
+    const hard = run(0.2, 1, 0.05);
+    expect(Math.max(...hard.xs)).toBeLessThanOrEqual(1 + 1e-9);
+    expect(hard.last.x).toBe(1);
+    // Every case, sampled: never beyond the target on the far side.
+    for (const [from, target, v] of [[0.2, 1, 0.003], [-0.3, -1, -0.02], [0.9, 1, 0.1], [1.5, 1, -0.004]]) {
+      const r = run(from, target, v);
+      const beyond = r.xs.filter((x) => (target - from) * (x - target) > 1e-9);
+      expect(beyond).toEqual([]);
+      expect(r.last.x).toBe(target);
+    }
+    // A speed pointing away is dropped, so it never goes out and comes back.
+    const away = springPlan(0.3, 0, 0.01);
+    expect(away.v0).toBe(0);
+    expect(springAt(away, 0).v).toBeCloseTo(0, 9);
   });
 });

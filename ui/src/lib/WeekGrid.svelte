@@ -13,8 +13,8 @@
   import { HOUR_PX_DEFAULT, hourPxAfterPinch, hourPxAfterWheel, scrollTopKeeping } from './zoom';
   import { onPinch, type Pinch } from './pinch';
   import {
-    BAND_ROWS, FLING_TAU_MS, flingProgress, flingTravel, packBandLanes, panCommit, sliceWeek, snapPlan,
-    velocityOf, visibleIndex, type PanSample,
+    BAND_ROWS, FLING_MIN_V, PAGE_FLICK_PX_PER_MS, TOUCH_LIFT_WHEEL_MS, packBandLanes, padFor, panCommit,
+    settleTarget, sliceWeek, springAt, springPlan, velocityOf, visibleIndex, type PanSample,
   } from './weekwindow';
   import type { Lane, WeekPayload, UiEvent } from './api';
   import type { Rect } from './position';
@@ -313,17 +313,33 @@
   let panColWidth = 0;
   /** The last wheel events, for the speed at lift. */
   let panSamples: PanSample[] = [];
-  /** Finger travel to column travel. One to one made a week the whole
-   *  width of a touchpad, since a wheel's pixels are the finger's; at two,
-   *  a week is a comfortable swipe and a day still lands where you meant.
-   *  Tuned by feel on the omarchy box, 2026-09-03. */
+  /** Columns handed up since the gesture began, in pan units. With `panDays`
+   *  it is the gesture's whole travel, which is what the settle is decided
+   *  on: `panDays` alone forgets every column already crossed. */
+  let panHanded = 0;
+  /** Whether the settle's spring is running, so a wheel that arrives during
+   *  it starts a new gesture from where the track is rather than extending
+   *  the one that already ended. */
+  let panSettling = false;
+  /** Finger travel to column travel on a touchpad. One to one made a week the
+   *  whole width of a touchpad, since a wheel's pixels are the finger's; at
+   *  two, a week is a comfortable swipe and a day still lands where you
+   *  meant. Tuned by feel on the omarchy box, 2026-09-03. A finger on the
+   *  screen itself is one to one (`panTouch`): the day under it stays under it. */
   const PAN_GAIN = 2;
   /** A wheel this long unheard is the fingers lifting: WebKit reports no
-   *  gesture phases on a DOM wheel event, so the pause is the only signal.
-   *  Momentum on macOS keeps the events coming and so keeps the track
-   *  moving, which is what a scroll view would do. */
+   *  gesture phases on a DOM wheel event, so on a touchpad the pause is the
+   *  only signal. Momentum on macOS keeps the events coming and so keeps the
+   *  track moving, which is what a scroll view would do. A touchscreen says
+   *  so directly (`endTouchPan`) and never waits for this. */
   const PAN_LULL_MS = 120;
-  const PAN_SNAP_MS = 180;
+
+  /** The gesture under way is a finger on the screen, not a touchpad: set by
+   *  the press that began it, which a touchpad swipe never makes. */
+  let panTouch = false;
+  /** When the last finger left the screen. See `wheelPan` for the wheel
+   *  event WebKitGTK sends right after, which is not movement. */
+  let touchLiftAt = -Infinity;
 
   /** Any column's width — they are all one width, and the track is sized
    *  from the visible count, so this is the pane's width over `visible`. */
@@ -332,57 +348,94 @@
     return col ? col.getBoundingClientRect().width : 0;
   }
 
-  /** The fingers lifted. A flick keeps going with momentum first — the
-   *  speed at lift decaying away, whole days handed up as their columns
-   *  pass — and then, or at once for a stop, the track settles on the
-   *  nearest whole column (one more day past half) and eases the
-   *  remainder out. */
+  /** Whether a finger is on the screen now. A gesture is a touch gesture if
+   *  one is when it begins; a touchpad swipe never presses anything, so a
+   *  finger that tapped earlier cannot make the touchpad one to one. */
+  let touchDown = false;
+
+  /** A press on either grid root, seen before anything inside handles it. */
+  function notePress(e: PointerEvent) {
+    if (e.pointerType === 'touch') touchDown = true;
+  }
+
+  /** The finger left the screen. If it was sliding the track, that is the
+   *  end of the gesture, now rather than a lull later. */
+  function endTouchPan(e: PointerEvent) {
+    if (e.pointerType !== 'touch') return;
+    touchDown = false;
+    touchLiftAt = performance.now();
+    if (panActive && !panSettling) {
+      clearTimeout(panLull);
+      settlePan();
+    }
+  }
+
+  /** The fingers lifted. One spring from where the track is to the column it
+   *  should rest on (`settleTarget`), carrying the speed they left with, and
+   *  whole days handed up as their columns pass. */
   function settlePan() {
-    const travel = flingTravel(velocityOf(panSamples));
-    panSamples = [];
-    if (travel === 0) {
-      snapToColumn();
+    clearTimeout(panLull);
+    if (panColWidth <= 0) {
+      panDays = 0;
+      panActive = false;
       return;
     }
-    const from = panDays;
+    const x = panHanded + panDays;
+    const v = velocityOf(panSamples);
+    panSamples = [];
+    // Day view under a finger is a pager (#127). Everywhere else momentum
+    // projects, capped a column short of the padding either side so the
+    // landing never outruns what is already on the track.
+    const pager = panTouch && visible === 1;
+    const target = settleTarget(x, v, {
+      pager,
+      minV: pager ? PAGE_FLICK_PX_PER_MS / panColWidth : FLING_MIN_V,
+      cap: Math.max(1, padFor(visible) - 1),
+    });
+    const plan = springPlan(x, target, v);
     const started = performance.now();
-    let handed = 0;
-    const glide = (t: number) => {
-      const target = from + travel * flingProgress(t - started);
-      // Commit the whole columns the glide has passed, the way the wheel
-      // does, so the window walks through the padding under the motion.
-      const { shift, rest } = panCommit(target - handed);
+    panSettling = true;
+    const step = (t: number) => {
+      const s = springAt(plan, Math.max(0, t - started));
+      const { shift, rest } = panCommit(s.x - panHanded);
       if (shift !== 0) {
-        handed -= shift;
+        panHanded -= shift;
         onpan?.(shift);
       }
       panDays = rest;
-      if (t - started < FLING_TAU_MS * 4) {
-        snapRaf = requestAnimationFrame(glide);
-      } else {
-        snapToColumn();
-      }
-    };
-    snapRaf = requestAnimationFrame(glide);
-  }
-
-  function snapToColumn() {
-    const { shift, from } = snapPlan(panDays);
-    if (shift !== 0) onpan?.(shift);
-    panDays = from;
-    const started = performance.now();
-    const step = (t: number) => {
-      const k = Math.min(1, (t - started) / PAN_SNAP_MS);
-      const eased = 1 - (1 - k) * (1 - k);
-      panDays = from * (1 - eased);
-      if (k < 1) {
+      if (!s.done) {
         snapRaf = requestAnimationFrame(step);
-      } else {
-        panDays = 0;
-        panActive = false;
+        return;
       }
+      panDays = 0;
+      panHanded = 0;
+      panSettling = false;
+      panActive = false;
     };
     snapRaf = requestAnimationFrame(step);
+  }
+
+  /** A sideways swipe has begun, so whatever a press inside the grid had
+   *  started is not what the hand meant. Without this, a finger swiping
+   *  across the grid swept out a new all-day event and opened its form, and
+   *  one starting on an event dragged the event (found 2026-09-15 with a
+   *  virtual touchscreen). Each ends the way Escape ends it: nothing written,
+   *  and the click the release would dispatch swallowed. */
+  function cancelPressGestures() {
+    if (drag) {
+      draggedNotClicked = true;
+      endDrag();
+    }
+    if (sweep) {
+      draggedNotClicked = true;
+      endSweep();
+    }
+    if (taskDrag) endTaskDrag(false);
+    if (draftDrag) {
+      const origin = draftDrag.origin;
+      endDraftDrag();
+      ondraftmove?.(origin);
+    }
   }
   let handledRevealNowRequest: number | null = null;
   const INITIAL_VIEWPORT_FRACTION = 1 / 3;
@@ -1442,11 +1495,13 @@
 
   /** Horizontal panning (spec 2026-08-28 §3; continuous since 2026-09-03):
    *  the track follows the finger a column per column, hands whole days up
-   *  as they are crossed, and settles on the nearest day after a lull. The
-   *  old rule was a day per 90px of wheel with nothing moving in between —
-   *  the finger's travel and the column's never matched, and every day was
-   *  a fetch away. Only a dominantly horizontal wheel is consumed —
-   *  vertical scrolling through the hours stays entirely native. */
+   *  as they are crossed, and settles when the fingers lift. The old rule was
+   *  a day per 90px of wheel with nothing moving in between — the finger's
+   *  travel and the column's never matched, and every day was a fetch away.
+   *  A gesture begins only on a dominantly horizontal wheel, so scrolling
+   *  through the hours stays native; once it has begun it keeps the axis
+   *  until it settles, so a finger's small vertical wobble mid-swipe neither
+   *  scrolls the hours nor stalls the track. */
   function wheelPan(e: WheelEvent) {
     // Ctrl+scroll zooms the hours (2026-09-03). `App` has already cancelled
     // the browser's own page zoom on every Ctrl+wheel, so this only has to
@@ -1459,16 +1514,36 @@
       hourPx = hourPxAfterWheel(hourPx, e.deltaY);
       return;
     }
-    if (!onpan || Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return;
+    if (!onpan) return;
+    const sideways = Math.abs(e.deltaX) > Math.abs(e.deltaY);
+    // **Not movement (#127).** When a finger leaves the screen, WebKitGTK
+    // follows its `pointerup` with one wheel event of its own whose deltaX
+    // is the finger's speed in px/s, with the opposite sign to the swipe:
+    // measured with a virtual touchscreen on 2.52.6, a rightward swipe of
+    // `deltaX -46` steps ends in `+554` slow, `+1669` brisk, `+5512` fast.
+    // Read as travel it threw the track days the wrong way, and fed the
+    // same wrong speed to the settle. `endTouchPan` has already ended the
+    // gesture; this only keeps the event from reaching anything else.
+    if (performance.now() - touchLiftAt < TOUCH_LIFT_WHEEL_MS) {
+      if (sideways || panActive) e.preventDefault();
+      return;
+    }
+    const tracking = panActive && !panSettling;
+    if (!sideways && !tracking) return;
     e.preventDefault();
-    if (!panActive) {
-      panColWidth = colWidth();
+    if (!tracking) {
+      // A new gesture, from rest or from inside a settle it interrupts.
+      if (!panActive) panColWidth = colWidth();
+      cancelAnimationFrame(snapRaf);
+      panSettling = false;
+      panHanded = 0;
       panSamples = [];
+      panTouch = touchDown;
+      cancelPressGestures();
     }
     if (panColWidth <= 0) return;
-    cancelAnimationFrame(snapRaf);
     panActive = true;
-    const days = -(e.deltaX * PAN_GAIN) / panColWidth;
+    const days = -(e.deltaX * (panTouch ? 1 : PAN_GAIN)) / panColWidth;
     panDays += days;
     panSamples.push({ t: performance.now(), days });
     if (panSamples.length > 12) panSamples.shift();
@@ -1477,6 +1552,7 @@
       // Both in one flush: the window moves a day and the track moves back
       // a column, and the day under the finger stays where it is.
       panDays = rest;
+      panHanded -= shift;
       onpan(shift);
     }
     clearTimeout(panLull);
@@ -1485,10 +1561,11 @@
 </script>
 
 <svelte:window onkeydown={trackAlt} onkeyup={trackAlt} onpointermove={trackAlt}
+  onpointerup={endTouchPan} onpointercancel={endTouchPan}
   onblur={() => { altHeld = false; }}
   bind:innerWidth={viewportWidth} bind:innerHeight={viewportHeight} />
 
-<div class="grid" style="--cols:{renderedDays.length}; --visible:{visible}; --vis:{renderVis}; --pan:{panDays}; --gutter:{gutterWidth()}" onwheel={wheelPan}>
+<div class="grid" style="--cols:{renderedDays.length}; --visible:{visible}; --vis:{renderVis}; --pan:{panDays}; --gutter:{gutterWidth()}" onwheel={wheelPan} onpointerdowncapture={notePress}>
   <div class="gutter head">
     {#if secondZone()}
       <!-- Which clock is which, Google's own layout: the convenience zone in
@@ -1602,7 +1679,7 @@
   onopen={openPopover}
 />
 
-<div class="grid body quiet-scroll" class:creating={createMode} style="--cols:{renderedDays.length}; --visible:{visible}; --vis:{renderVis}; --pan:{panDays}; --gutter:{gutterWidth()}; --hour-px:{Math.round(hourPx)}px" bind:this={bodyEl} data-testid="week-body" onwheel={wheelPan}>
+<div class="grid body quiet-scroll" class:creating={createMode} style="--cols:{renderedDays.length}; --visible:{visible}; --vis:{renderVis}; --pan:{panDays}; --gutter:{gutterWidth()}; --hour-px:{Math.round(hourPx)}px" bind:this={bodyEl} data-testid="week-body" onwheel={wheelPan} onpointerdowncapture={notePress}>
   <div class="hour-crop ruler" style:height={`${visibleHeight}px`}><div class="gutter" style={columnStyle(gutterDay)}>
     {#each HOURS as h}
       {#if secondZone()}

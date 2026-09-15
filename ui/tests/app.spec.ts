@@ -4751,6 +4751,60 @@ test.describe('App: week panning', () => {
     await page.waitForTimeout(200);
     expect(await callsTo(page, 'get_range')).toEqual([]);
   });
+
+  /**
+   * **#127: a finger's swipe moves Day view one day, the way it went.**
+   *
+   * Replayed from what WebKitGTK 2.52.6 actually dispatched for a fast
+   * one-finger swipe to the right, recorded with a virtual touchscreen: a
+   * touch press, pointer moves each paired with a `deltaX -46` wheel, the
+   * release, and then one more wheel of WebKit's own carrying the finger's
+   * speed with the opposite sign (`+5512`). That last event, read as travel,
+   * threw the view about three weeks the wrong way. The pointer moves are
+   * here too because they are a sweep-to-create across the grid, and that
+   * swept out a new all-day event under the swipe and opened its form.
+   */
+  test('a fast finger swipe in Day view moves exactly one day back, and creates nothing', async ({ page }) => {
+    await page.goto(app());
+    await expect(page.locator('.vswitch button')).toHaveCount(5);
+    await page.keyboard.press('1');
+    await expect(page.locator('.col')).toHaveCount(1);
+    const startDay = Number(await page.locator('.col').first().getAttribute('data-start-ms'));
+
+    await page.evaluate(async () => {
+      const body = document.querySelector('[data-testid="week-body"]')!.getBoundingClientRect();
+      let x = body.left + 60;
+      const y = body.top + body.height / 2;
+      const target = document.elementFromPoint(x, y)!;
+      const pointer = (type: string) => new PointerEvent(type, {
+        pointerType: 'touch', pointerId: 7, isPrimary: true, button: type === 'pointermove' ? -1 : 0,
+        buttons: type === 'pointerup' ? 0 : 1, clientX: x, clientY: y, bubbles: true, cancelable: true,
+      });
+      const wheel = (dx: number) => new WheelEvent('wheel', {
+        deltaX: dx, deltaY: 0, clientX: x, clientY: y, bubbles: true, cancelable: true,
+      });
+      const pause = () => new Promise((r) => setTimeout(r, 8));
+      target.dispatchEvent(pointer('pointerdown'));
+      for (let i = 0; i < 11; i++) {
+        await pause();
+        x += 46;
+        target.dispatchEvent(pointer('pointermove'));
+        target.dispatchEvent(wheel(-46));
+      }
+      target.dispatchEvent(pointer('pointerup'));
+      target.dispatchEvent(wheel(5512));
+    });
+
+    // Settled on the day before, not three weeks on.
+    await expect(page.locator('.col')).toHaveCount(1);
+    await expect
+      .poll(async () => Number(await page.locator('.col').first().getAttribute('data-start-ms')))
+      .toBe(startDay - 86_400_000);
+    await page.waitForTimeout(300);
+    expect(Number(await page.locator('.col').first().getAttribute('data-start-ms'))).toBe(startDay - 86_400_000);
+    // And the swipe was not also a sweep across the grid.
+    await expect(page.getByRole('dialog', { name: 'New event' })).toHaveCount(0);
+  });
 });
 
 test.describe('App: the keyboard sheet', () => {

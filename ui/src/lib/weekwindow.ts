@@ -152,16 +152,6 @@ export function panCommit(panDays: number): { shift: number; rest: number } {
 }
 
 /**
- * Where a pan settles when the fingers lift: the nearest whole column. More
- * than half a column over commits one more day (`shift`), and the track
- * animates from what is then left (`from`) back to zero.
- */
-export function snapPlan(panDays: number): { shift: number; from: number } {
-  const nearest = Math.round(panDays);
-  return { shift: -nearest + 0, from: panDays - nearest };
-}
-
-/**
  * Whether `days` holds the window *and* `margin` days beyond it on each
  * side — the case in which a fetch can wait. A pan inside the padding needs
  * nothing fetched to draw, so the refetch that recentres the padding is
@@ -198,26 +188,84 @@ export function velocityOf(samples: PanSample[], windowMs = 100): number {
   return days / span;
 }
 
-/** Momentum's time constant: after the fingers lift, the speed decays as
- *  e^(-t/τ), so a flick at `v` columns/ms travels `v * τ` more columns. 400
- *  puts a brisk flick two to three days on, a hard one a week. Linux has no
- *  inertia of its own on a wheel — libinput stops at lift — and macOS's own
- *  momentum events keep our lull from firing until they have decayed, by
- *  which time the speed is low and this adds nothing. */
+/** Momentum's reach: a flick at `v` columns/ms is projected `v * τ` columns
+ *  on before it is rounded to a column. 400 puts a brisk touchpad flick two to
+ *  three days on, a hard one a week. Linux has no inertia of its own on a
+ *  wheel (libinput stops at lift), and macOS's own momentum events keep the
+ *  lull from firing until they have decayed, by which time the projection
+ *  adds nothing. */
 export const FLING_TAU_MS = 400;
-/** Below this, the fingers stopped rather than flicked: settle at once. */
+/** Below this, the fingers stopped rather than flicked: settle on the nearest
+ *  column. */
 export const FLING_MIN_V = 0.0015;
-/** Never further than the padding on one side minus a column: momentum
- *  that outran the payload would slide into nothing. */
-export const FLING_MAX_DAYS = 6;
+/** A finger on glass faster than this, in pixels per ms, is a flick for Day
+ *  view's one-page-per-swipe rule (#127), however little it travelled. A
+ *  deliberate slow swipe is about 0.4 px/ms; a finger resting and then
+ *  lifting is well under 0.1. */
+export const PAGE_FLICK_PX_PER_MS = 0.25;
 
-/** How far a fling at `v` columns/ms will travel, capped. Signed. */
-export function flingTravel(v: number, tau = FLING_TAU_MS, cap = FLING_MAX_DAYS): number {
-  if (Math.abs(v) < FLING_MIN_V) return 0;
-  const d = v * tau;
-  return Math.max(-cap, Math.min(cap, d));
+/**
+ * Where a released pan comes to rest, in pan units (columns; positive is
+ * content moved right, toward earlier days) counted from where the gesture
+ * began. `x` is how far it has travelled, `v` its speed at lift in columns/ms.
+ *
+ * - **A pager** (Day view under a finger, #127) moves one page per swipe,
+ *   the way Android's calendar does. A flick goes to the next page in its
+ *   own direction from wherever the finger left the page; anything slower
+ *   goes to the nearer page. Never more than one page from where it began.
+ * - **Otherwise** the flick is projected (`v * tau`) and rounded to a column,
+ *   capped at `cap` columns either side of where the fingers left it, so the
+ *   landing stays inside the padding already on the track.
+ */
+export function settleTarget(
+  x: number, v: number,
+  o: { pager: boolean; minV: number; tau?: number; cap: number },
+): number {
+  if (o.pager) {
+    const flick = Math.abs(v) >= o.minV;
+    // `1e-9` so a page already exactly reached counts as reached, not as one
+    // still to go: floor(1) + 1 would be 2 before the clamp said otherwise.
+    const next = !flick ? Math.round(x) : v > 0 ? Math.floor(x + 1e-9) + 1 : Math.ceil(x - 1e-9) - 1;
+    return Math.max(-1, Math.min(1, next)) + 0;
+  }
+  const projected = Math.abs(v) >= o.minV ? x + v * (o.tau ?? FLING_TAU_MS) : x;
+  const near = Math.round(x);
+  return Math.max(near - o.cap, Math.min(near + o.cap, Math.round(projected))) + 0;
 }
 
-/** Where a fling stands `t` ms after lift, as a fraction of its travel:
- *  1 - e^(-t/τ), which is the integral of the decaying speed. */
-export const flingProgress = (t: number, tau = FLING_TAU_MS) => 1 - Math.exp(-t / tau);
+/** The settle's stiffness from a standstill, per ms: at rest in about 350ms. */
+export const SPRING_OMEGA = 0.024;
+
+/**
+ * One critically damped spring from `from` to `target`, carrying the speed
+ * the fingers left with. This is the whole settle: no separate glide and
+ * snap, so the motion never pauses between two curves (the old pair took up
+ * to 1.9 s and stalled between them).
+ *
+ * Two rules keep it from ever looking like rubber. A speed pointing away
+ * from the target is dropped rather than carried, so it never goes out and
+ * comes back. A speed toward it stiffens the spring (`omega >= |v / a|`), so
+ * a hard flick lands sooner instead of shooting past: that is exactly the
+ * condition under which `a + b t` keeps its sign, and so never crosses the
+ * target.
+ */
+export function springPlan(from: number, target: number, v: number) {
+  const a = from - target;
+  const v0 = v * (target - from) > 0 ? v : 0;
+  const omega = a === 0 ? SPRING_OMEGA : Math.max(SPRING_OMEGA, Math.abs(v0 / a));
+  return { a, v0, omega, target };
+}
+
+/** The spring `t` ms in: position, speed, and whether it has come to rest. */
+export function springAt(p: ReturnType<typeof springPlan>, t: number) {
+  const b = p.v0 + p.omega * p.a;
+  const e = Math.exp(-p.omega * t);
+  const off = (p.a + b * t) * e;
+  const speed = (b - p.omega * (p.a + b * t)) * e;
+  const done = (Math.abs(off) < 1e-3 && Math.abs(speed) < 1e-4) || t > 2000;
+  return { x: done ? p.target : p.target + off, v: done ? 0 : speed, done };
+}
+
+/** How long after a finger lifts WebKitGTK's own wheel event for that lift
+ *  arrives (measured 0–11 ms on 2.52.6), with room to spare. */
+export const TOUCH_LIFT_WHEEL_MS = 60;
