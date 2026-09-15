@@ -11,9 +11,13 @@
 import type { Lane, WeekPayload } from './api';
 
 /** Days of padding either side of a window of `visible` days: the window's
- *  own width, so a swipe can travel a whole window before it outruns the
- *  payload, and never fewer than three, so Day view has somewhere to go. */
-export const padFor = (visible: number) => Math.max(3, visible);
+ *  own width plus two, so a strong swipe can page a whole window (the ‹ / ›
+ *  step, see `settleTarget`) and still land inside what is already on the
+ *  track, with `windowHeld`'s two-day margin to spare. That margin is what
+ *  defers the refetch until the settle is over instead of replacing the
+ *  payload under the last frames of the motion. Never fewer than three, so
+ *  Day view has somewhere to go. */
+export const padFor = (visible: number) => Math.max(3, visible + 2);
 
 /**
  * Where the window starts in `days`: the index of the day beginning at
@@ -204,33 +208,59 @@ export const FLING_MIN_V = 0.0015;
  *  lifting is well under 0.1. */
 export const PAGE_FLICK_PX_PER_MS = 0.25;
 
+/** A swipe released faster than this, in pixels of input per ms, is a
+ *  strong one: the ‹ / › step. Measured on the omarchy box 2026-09-15 with a
+ *  logger window: touchpad gentle 0.02–0.87 and strong 4.1–7.9 px/ms; finger
+ *  gentle 0.44–1.19 and strong 2.96–7.2. Two sits in the middle of both gaps.
+ *  It is a speed of the hand, not of the calendar. The first cut asked for
+ *  momentum worth half a page in *days*, which in a half-width window (100px
+ *  columns) a slow scroll already had, so slow scrolling paged whole weeks
+ *  and the events seemed to vanish. */
+export const STRONG_SWIPE_PX_PER_MS = 2;
+/** ...and it must have travelled this far, so a quick twitch never pages. */
+export const STRONG_SWIPE_MIN_PX = 40;
+
 /**
  * Where a released pan comes to rest, in pan units (columns; positive is
  * content moved right, toward earlier days) counted from where the gesture
- * began. `x` is how far it has travelled, `v` its speed at lift in columns/ms.
+ * began. `x` is how far it has travelled, `v` its speed at lift in columns/ms,
+ * and `page` the window's width in days: what the ‹ / › buttons step.
+ * `strongV` and `strongX` are the strong-swipe thresholds already turned into
+ * columns by the caller, which knows the column width and the gain.
  *
- * - **A pager** (Day view under a finger, #127) moves one page per swipe,
- *   the way Android's calendar does. A flick goes to the next page in its
- *   own direction from wherever the finger left the page; anything slower
- *   goes to the nearer page. Never more than one page from where it began.
- * - **Otherwise** the flick is projected (`v * tau`) and rounded to a column,
- *   capped at `cap` columns either side of where the fingers left it, so the
- *   landing stays inside the padding already on the track.
+ * - **A strong swipe is the ‹ / › button.** It lands on the next page
+ *   boundary in its own direction, pages counted from where the gesture
+ *   began: exactly where the button would have taken the view from there,
+ *   and a week slid off its alignment by an earlier swipe keeps its offset,
+ *   as the button keeps it.
+ * - **Anything gentler follows the hand:** the flick's momentum (`v * tau`)
+ *   rounded to a day, never as far as a page from where the fingers left it.
+ * - **A pager** (Day view under a finger, #127) pages on every flick, however
+ *   slow, the way Android's calendar does, and never more than one page from
+ *   where it began. Without a flick it goes to the nearer page.
  */
 export function settleTarget(
   x: number, v: number,
-  o: { pager: boolean; minV: number; tau?: number; cap: number },
+  o: { page: number; pager: boolean; minV: number; strongV?: number; strongX?: number; tau?: number },
 ): number {
-  if (o.pager) {
-    const flick = Math.abs(v) >= o.minV;
-    // `1e-9` so a page already exactly reached counts as reached, not as one
-    // still to go: floor(1) + 1 would be 2 before the clamp said otherwise.
-    const next = !flick ? Math.round(x) : v > 0 ? Math.floor(x + 1e-9) + 1 : Math.ceil(x - 1e-9) - 1;
-    return Math.max(-1, Math.min(1, next)) + 0;
+  const page = Math.max(1, o.page);
+  const moving = Math.abs(v) >= o.minV;
+  const strong = o.pager
+    ? moving
+    : o.strongV !== undefined && Math.abs(v) >= o.strongV && Math.abs(x) >= (o.strongX ?? 0);
+  if (strong) {
+    const u = x / page;
+    // `1e-9` so a page boundary already exactly reached counts as reached,
+    // not as one still to go: floor(1) + 1 would be 2.
+    let next = v > 0 ? Math.floor(u + 1e-9) + 1 : Math.ceil(u - 1e-9) - 1;
+    if (o.pager) next = Math.max(-1, Math.min(1, next));
+    return next * page + 0;
   }
-  const projected = Math.abs(v) >= o.minV ? x + v * (o.tau ?? FLING_TAU_MS) : x;
   const near = Math.round(x);
-  return Math.max(near - o.cap, Math.min(near + o.cap, Math.round(projected))) + 0;
+  if (o.pager) return Math.max(-1, Math.min(1, near)) + 0;
+  const reach = moving ? v * (o.tau ?? FLING_TAU_MS) : 0;
+  const lim = Math.max(1, page - 1);
+  return Math.max(near - lim, Math.min(near + lim, Math.round(x + reach))) + 0;
 }
 
 /** The settle's stiffness from a standstill, per ms: at rest in about 350ms. */

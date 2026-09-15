@@ -12,10 +12,12 @@ const lane = (start_col: number, end_col: number, idx = 0) =>
   ({ idx, lane: 0, start_col, end_col, cont_left: false, cont_right: false });
 
 test.describe('the window on a padded week', () => {
-  test('padding is the window\'s own width, and never less than three days', () => {
-    expect(padFor(7)).toBe(7);
-    expect(padFor(5)).toBe(5);
-    expect(padFor(3)).toBe(3);
+  test('padding is a page and two more, and never less than three days', () => {
+    // A whole page (the ‹ / › step a strong swipe takes) plus `windowHeld`'s
+    // two-day margin, so the landing never triggers the refetch mid-motion.
+    expect(padFor(7)).toBe(9);
+    expect(padFor(5)).toBe(7);
+    expect(padFor(3)).toBe(5);
     expect(padFor(1)).toBe(3);
   });
 
@@ -146,59 +148,65 @@ test.describe('the window on a padded week', () => {
   });
 
   test('a pan that stops settles on the nearest column, one more past half', () => {
-    const o = { pager: false, minV: FLING_MIN_V, cap: 6 };
+    const o = { page: 7, pager: false, minV: FLING_MIN_V };
     expect(settleTarget(0.3, 0, o)).toBe(0);
     expect(settleTarget(0.6, 0, o)).toBe(1);
     expect(settleTarget(-0.6, 0, o)).toBe(-1);
     expect(settleTarget(2.4, 0, o)).toBe(2);
     expect(settleTarget(0, 0, o)).toBe(0);
-  });
-});
-
-test.describe('the pan\'s feel: what waits, and what flies', () => {
-  test('a window inside the padding, with a margin, holds; at the edge it does not', () => {
-    // 21 days, window of 7 at index 7: seven days of padding each side.
-    expect(windowHeld(days(21), 7 * DAY, 7, 2)).toBe(true);
-    // At index 2 the margin is exactly met; at 1 it is not.
-    expect(windowHeld(days(21), 2 * DAY, 7, 2)).toBe(true);
-    expect(windowHeld(days(21), 1 * DAY, 7, 2)).toBe(false);
-    // At the far edge likewise: 12 + 7 + 2 = 21 holds, 13 does not.
-    expect(windowHeld(days(21), 12 * DAY, 7, 2)).toBe(true);
-    expect(windowHeld(days(21), 13 * DAY, 7, 2)).toBe(false);
-    // Not in the payload at all: fetch now.
-    expect(windowHeld(days(21), 40 * DAY, 7, 2)).toBe(false);
-    // An unpadded payload never holds.
-    expect(windowHeld(days(7), 0, 7, 2)).toBe(false);
+    // A slow drag past a whole week is not pulled back when it stops.
+    expect(settleTarget(8.2, 0, o)).toBe(8);
   });
 
-  test('the speed at lift is read off the last hundred milliseconds', () => {
-    // A slow drag, then a flick: 0.1 columns over 100ms each for a while,
-    // then 0.5 columns in 40ms.
-    const samples = [
-      { t: 0, days: 0 }, { t: 100, days: 0.1 }, { t: 200, days: 0.1 }, { t: 300, days: 0.1 },
-      { t: 320, days: 0.25 }, { t: 340, days: 0.25 },
-    ];
-    expect(velocityOf(samples)).toBeCloseTo(0.5 / 40, 6);
-    expect(velocityOf([{ t: 0, days: 1 }])).toBe(0);
-    expect(velocityOf([])).toBe(0);
-  });
-
-  test('a flick travels with its speed, and never further than the padding allows', () => {
-    const o = { pager: false, minV: FLING_MIN_V, cap: 6 };
+  test('a gentle flick glides a few days, never as far as a page', () => {
+    const o = { page: 7, pager: false, minV: FLING_MIN_V };
     // Below the flick speed: the nearest column, as if it had stopped.
     expect(settleTarget(0.2, 0.001, o)).toBe(0);
-    // 5 columns/s projected for 0.4 s is two more.
+    // 5 columns/s projected for 0.4 s is two more: under half a page.
     expect(settleTarget(0.2, 0.005, o)).toBe(2);
     expect(settleTarget(-0.2, -0.005, o)).toBe(-2);
-    // Capped either side of where the fingers left it.
-    expect(settleTarget(0, 0.1, o)).toBe(6);
-    expect(settleTarget(3, -0.1, o)).toBe(-3);
-    expect(settleTarget(0, 0.1, { ...o, cap: 2 })).toBe(2);
+    expect(settleTarget(0.2, 0.008, o)).toBe(3);
     expect(FLING_TAU_MS).toBe(400);
   });
 
+  test('a strong swipe is the ‹ / › button: exactly one page, from where the gesture began', () => {
+    // Thresholds as the grid passes them, already in columns.
+    const week = { page: 7, pager: false, minV: FLING_MIN_V, strongV: 0.02, strongX: 0.4 };
+    expect(settleTarget(0.5, 0.03, week)).toBe(7);
+    expect(settleTarget(-0.5, -0.03, week)).toBe(-7);
+    expect(settleTarget(0.5, 1, week)).toBe(7);
+    // Pages count from the gesture's start, so a swipe already two days in
+    // still lands on the week the button would have, not two days past it.
+    expect(settleTarget(2, 0.05, week)).toBe(7);
+    // Flicked back from two days in: the page it began on, the next boundary
+    // that way.
+    expect(settleTarget(2, -0.05, week)).toBe(0);
+    // Dragged past a whole page and flicked on: the next boundary beyond.
+    expect(settleTarget(8, 0.05, week)).toBe(14);
+    // A rolling week of three pages by three, as its buttons step.
+    expect(settleTarget(0.5, 0.03, { ...week, page: 3 })).toBe(3);
+    // Day view on a touchpad: the button is a day, and so is a strong flick.
+    const day = { page: 1, pager: false, minV: FLING_MIN_V, strongV: 0.003, strongX: 0.06 };
+    expect(settleTarget(0.3, 0.03, day)).toBe(1);
+    expect(settleTarget(-0.3, -0.03, day)).toBe(-1);
+  });
+
+  test('strong is a speed of the hand: a slow scroll never pages, however narrow the columns', () => {
+    // The regression Plamen caught in the first cut: in a half-width window a
+    // slow touchpad scroll has momentum worth four 100px columns, which read
+    // as "half a week" and paged. Below the speed it glides where the
+    // momentum takes it, as before.
+    const week = { page: 7, pager: false, minV: FLING_MIN_V, strongV: 0.04, strongX: 0.8 };
+    expect(settleTarget(2, 0.01, week)).toBe(6);
+    expect(settleTarget(2, 0.015, week)).toBe(8);
+    // Fast but barely moved: a twitch, not a page.
+    expect(settleTarget(0.3, 0.2, week)).not.toBe(7);
+    // Without thresholds at all, nothing is ever strong.
+    expect(settleTarget(0.4, 1, { page: 7, pager: false, minV: FLING_MIN_V })).toBe(6);
+  });
+
   test('Day view under a finger moves one page per swipe, the way the flick points (#127)', () => {
-    const o = { pager: true, minV: 0.0002, cap: 2 };
+    const o = { page: 1, pager: true, minV: 0.0002 };
     // A flick from a little way in goes on to the next page...
     expect(settleTarget(0.2, 0.001, o)).toBe(1);
     expect(settleTarget(-0.2, -0.001, o)).toBe(-1);

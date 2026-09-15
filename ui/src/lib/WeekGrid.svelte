@@ -13,7 +13,8 @@
   import { HOUR_PX_DEFAULT, hourPxAfterPinch, hourPxAfterWheel, scrollTopKeeping } from './zoom';
   import { onPinch, type Pinch } from './pinch';
   import {
-    BAND_ROWS, FLING_MIN_V, PAGE_FLICK_PX_PER_MS, TOUCH_LIFT_WHEEL_MS, packBandLanes, padFor, panCommit,
+    BAND_ROWS, FLING_MIN_V, PAGE_FLICK_PX_PER_MS, STRONG_SWIPE_MIN_PX, STRONG_SWIPE_PX_PER_MS, TOUCH_LIFT_WHEEL_MS,
+    packBandLanes, panCommit,
     settleTarget, sliceWeek, springAt, springPlan, velocityOf, visibleIndex, type PanSample,
   } from './weekwindow';
   import type { Lane, WeekPayload, UiEvent } from './api';
@@ -383,14 +384,18 @@
     const x = panHanded + panDays;
     const v = velocityOf(panSamples);
     panSamples = [];
-    // Day view under a finger is a pager (#127). Everywhere else momentum
-    // projects, capped a column short of the padding either side so the
-    // landing never outruns what is already on the track.
+    // A strong swipe is the ‹ / › step, a page of `visible` days; Day view
+    // under a finger pages on every flick (#127). The strong thresholds are
+    // speeds of the hand, so they go through the gain and the column width
+    // here rather than being counted in days. See `settleTarget`.
     const pager = panTouch && visible === 1;
+    const perPx = (panTouch ? 1 : PAN_GAIN) / panColWidth;
     const target = settleTarget(x, v, {
+      page: visible,
       pager,
       minV: pager ? PAGE_FLICK_PX_PER_MS / panColWidth : FLING_MIN_V,
-      cap: Math.max(1, padFor(visible) - 1),
+      strongV: STRONG_SWIPE_PX_PER_MS * perPx,
+      strongX: STRONG_SWIPE_MIN_PX * perPx,
     });
     const plan = springPlan(x, target, v);
     const started = performance.now();

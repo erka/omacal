@@ -4705,9 +4705,10 @@ test.describe('App: week panning', () => {
     await expect(page.locator('.col')).toHaveCount(7);
     const [first] = await callsTo(page, 'get_week');
     const aligned = first.weekStartMs;
-    // Padded by a week either side (2026-09-03), so the slide has columns
-    // to reveal; at rest only the window is on the track.
-    expect(first.pad).toBe(7);
+    // Padded by a week and two days either side (2026-09-03; +2 since a
+    // strong swipe pages a whole week), so the slide has columns to reveal;
+    // at rest only the window is on the track.
+    expect(first.pad).toBe(9);
     await expect(page.locator('.col')).toHaveCount(7);
     const colWidth = (await page.locator('.col').first().boundingBox())!.width;
 
@@ -4720,13 +4721,13 @@ test.describe('App: week panning', () => {
     // through Date, as the spec asks.
     await page.mouse.wheel(Math.round(colWidth * 0.65), 0);
     // Mid-gesture the whole payload is on the track, padding included.
-    await expect(page.locator('.col')).toHaveCount(21);
+    await expect(page.locator('.col')).toHaveCount(25);
     await expect
       .poll(async () => (await callsTo(page, 'get_range')).map((a) => a.dayStartMs))
       .toContain(aligned + 86_400_000);
     const ranges = await callsTo(page, 'get_range');
     // A panned fixed week still shows its full seven days (spec §3), padded.
-    expect(ranges[ranges.length - 1]).toMatchObject({ dayCount: 7, pad: 7 });
+    expect(ranges[ranges.length - 1]).toMatchObject({ dayCount: 7, pad: 9 });
     // Settled: the window alone again, a day on.
     await expect(page.locator('.col')).toHaveCount(7);
     expect(await page.locator('.col').first().getAttribute('data-start-ms'))
@@ -4741,6 +4742,68 @@ test.describe('App: week panning', () => {
       .toBeGreaterThan(weeksBefore);
     const weeks = await callsTo(page, 'get_week');
     expect(weeks[weeks.length - 1].weekStartMs).toBe(aligned);
+  });
+
+  /** A strong swipe is the › button: exactly one week on, from where the
+   *  gesture began, however far past a page its momentum would have
+   *  carried. Plamen's proposal, 2026-09-15; also #118's week-by-week, with
+   *  no setting needed, since a gentle swipe still moves by days. */
+  test('a strong horizontal swipe pages exactly one week, as › does', async ({ page }) => {
+    await page.goto(app());
+    await expect(page.locator('.col')).toHaveCount(7);
+    const [first] = await callsTo(page, 'get_week');
+    const aligned = first.weekStartMs;
+    await page.locator('[data-testid="week-body"]').hover();
+    // A short, fast touchpad flick: four 60px wheels 8ms apart (under half a
+    // week of travel), then the fingers lift. Its momentum would carry
+    // weeks; it lands on the one week › steps. (A drag already past a whole
+    // week before the flick lands on the next boundary beyond instead,
+    // which `settleTarget`'s own table pins.)
+    await page.evaluate(async () => {
+      const body = document.querySelector('[data-testid="week-body"]')!;
+      const r = body.getBoundingClientRect();
+      for (let i = 0; i < 4; i++) {
+        body.dispatchEvent(new WheelEvent('wheel', {
+          deltaX: 60, deltaY: 0, clientX: r.left + r.width / 2, clientY: r.top + 100,
+          bubbles: true, cancelable: true,
+        }));
+        await new Promise((res) => setTimeout(res, 8));
+      }
+    });
+    await expect(page.locator('.col')).toHaveCount(7);
+    await expect
+      .poll(async () => Number(await page.locator('.col').first().getAttribute('data-start-ms')))
+      .toBe(aligned + 7 * 86_400_000);
+    await page.waitForTimeout(300);
+    expect(Number(await page.locator('.col').first().getAttribute('data-start-ms'))).toBe(aligned + 7 * 86_400_000);
+  });
+
+  /** The first cut of the rule above paged on momentum counted in days, so
+   *  in a half-width window a slow scroll paged a whole week at every pause
+   *  and the events seemed to vanish (Plamen, 2026-09-15). A slow scroll
+   *  glides; only the hand's speed pages. */
+  test('a slow horizontal scroll in a half-width window never pages a week', async ({ page }) => {
+    await page.setViewportSize({ width: 749, height: 900 });
+    await page.goto(app());
+    await expect(page.locator('.col')).toHaveCount(7);
+    const [first] = await callsTo(page, 'get_week');
+    const aligned = first.weekStartMs;
+    await page.evaluate(async () => {
+      const body = document.querySelector('[data-testid="week-body"]')!;
+      const r = body.getBoundingClientRect();
+      // 0.5 px/ms: a gentle touchpad scroll, well under the strong speed.
+      for (let i = 0; i < 6; i++) {
+        body.dispatchEvent(new WheelEvent('wheel', {
+          deltaX: 8, deltaY: 0, clientX: r.left + 300, clientY: r.top + 100, bubbles: true, cancelable: true,
+        }));
+        await new Promise((res) => setTimeout(res, 16));
+      }
+    });
+    await expect(page.locator('.col')).toHaveCount(7);
+    await page.waitForTimeout(400);
+    const moved = (Number(await page.locator('.col').first().getAttribute('data-start-ms')) - aligned) / 86_400_000;
+    expect(moved).toBeGreaterThan(0);
+    expect(moved).toBeLessThan(7);
   });
 
   test('a vertical wheel scrolls and never pans', async ({ page }) => {
