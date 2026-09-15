@@ -1480,6 +1480,25 @@ test.describe('Header', () => {
     expect(call.args).toMatchObject({ on: false });
   });
 
+  /** Photon (PR #125 review): off until asked, because the query leaves
+   *  the machine, and Photon's public server asks for light personal use.
+   *  History suggestions do not go through this switch. */
+  test('Appearance carries Photon place suggestions, off by default and saved on', async ({ page }) => {
+    await page.goto(show('Header', 'connected'));
+    const modal = await openSettings(page, 'Appearance');
+
+    const toggle = modal.getByRole('checkbox', {
+      name: 'Suggest places from OpenStreetMap (Photon)',
+    });
+    await expect(toggle).not.toBeChecked();
+    await toggle.check();
+    await expect(toggle).toBeChecked();
+
+    const calls = await page.evaluate(() => (window as any).__harness.calls);
+    const call = calls.find((c: any) => c.cmd === 'set_photon_places');
+    expect(call.args).toMatchObject({ on: true });
+  });
+
   /**
    * Start-on-login (issue #22, and the background mode asked for alongside
    * it): the app used to register its launch entry on every single start, so
@@ -4367,6 +4386,47 @@ test.describe('EventForm', () => {
     await page.getByRole('button', { name: 'Create' }).click();
     const [saved] = await saves(page);
     expect(saved.fields.location).toBe('zzzznowhere');
+  });
+
+  test('plain Enter in Location saves when no suggestion is picked', async ({ page }) => {
+    // The handler used to preventDefault every unmodified Enter, so a
+    // Location field with no list swallowed the key that should Create.
+    await open(page, 'create');
+    const input = page.getByLabel('Location');
+    await input.fill('zzzznowhere');
+    await expect(page.getByRole('listbox', { name: 'Places' })).toHaveCount(0);
+    await input.press('Enter');
+    const [saved] = await saves(page);
+    expect(saved.fields.location).toBe('zzzznowhere');
+  });
+
+  test('opening edit on a filled location does not search', async ({ page }) => {
+    // The $effect used to read value.location, so 300 ms after open the
+    // saved place went to search_places — and from there to Photon —
+    // without a keystroke. 400 ms is the debounce plus a margin; this
+    // is testing the absence of a timed hop, not guessing at layout.
+    await open(page, 'edit-with-place');
+    await expect(page.getByLabel('Location')).toHaveValue('Room 4A');
+    await expect(page.getByRole('listbox', { name: 'Places' })).toHaveCount(0);
+    await page.waitForTimeout(400);
+    await expect(page.getByRole('listbox', { name: 'Places' })).toHaveCount(0);
+    const n = await page.evaluate(() =>
+      (window as any).__harness.calls.filter((c: any) => c.cmd === 'search_places').length);
+    expect(n).toBe(0);
+  });
+
+  test('a meeting URL typed into Location is not sent to search_places', async ({ page }) => {
+    // Passcodes live in the query string. The typed text can still be
+    // saved; it must not leave the machine as a Photon query.
+    await open(page, 'create');
+    const input = page.getByLabel('Location');
+    await input.fill('https://us02web.zoom.us/j/123?pwd=secret');
+    await page.waitForTimeout(400);
+    const queries = await page.evaluate(() =>
+      (window as any).__harness.calls
+        .filter((c: any) => c.cmd === 'search_places')
+        .map((c: any) => c.args.query));
+    expect(queries).toEqual([]);
   });
 
   /** The time fields speak the app's clock, not the engine's: they are

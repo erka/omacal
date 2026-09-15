@@ -646,6 +646,7 @@ type StubSettings = {
   displayTimezone: string | null;
   secondTimezone: string | null;
   weatherEnabled: boolean;
+  photonPlaces: boolean;
   temperatureUnit: TemperatureUnit;
   startOnLogin: StartOnLogin;
   quitOnClose: boolean;
@@ -717,6 +718,9 @@ const DEFAULT_SETTINGS: StubSettings = {
   secondTimezone: null,
   // The backend's default: on unless somebody turned it off.
   weatherEnabled: true,
+  // Off until asked: typed locations do not leave the machine on a
+  // fresh install, and Photon's public server asks for light use.
+  photonPlaces: false,
   // The backend's default: Celsius, so no installed copy changes under its user.
   temperatureUnit: 'celsius',
   // The backend's default too, and for a reason the stub has to reproduce
@@ -1004,6 +1008,9 @@ export function installTauriStub(scenario: string): Harness {
       }
       case 'set_weather_enabled':
         settings = saveSettings({ ...settings, weatherEnabled: args.on as boolean });
+        return { ...settings };
+      case 'set_photon_places':
+        settings = saveSettings({ ...settings, photonPlaces: args.on as boolean });
         return { ...settings };
       case 'set_temperature_unit':
         settings = saveSettings({ ...settings, temperatureUnit: args.unit as TemperatureUnit });

@@ -6,6 +6,7 @@
   import { secondZone } from './secondzone.svelte';
   import { displayClock, parseClock, zoneAbbrev, zoneClock } from './timefmt';
   import { knownGuests, type KnownGuest } from './people';
+  import { containsHttpUrl } from './location';
   import { searchPlaces, type PlaceHit } from './places';
   import { escapeCloses } from './dismiss.svelte';
   import { placePopover, type Rect } from './position';
@@ -292,20 +293,24 @@
   // the form, Enter applies a highlighted or sole match and never Saves.
   // Search is debounced and generation-counted because Photon is a network
   // hop on the Rust side; guests are a local SELECT and need neither.
+  //
+  // Driven from `input`, never from the bound value: opening edit on an
+  // event that already has a location used to send that location to Photon
+  // 300 ms later without a keystroke. A URL in the field (Zoom passcode,
+  // map pin) is not searched at all.
   let locHits = $state<PlaceHit[]>([]);
   let locDismissed = $state(false);
   let locHi = $state(-1);
   let locGen = 0;
   let locTimer: ReturnType<typeof setTimeout> | undefined;
 
-  $effect(() => {
+  function schedulePlaceSearch() {
     const q = (value.location ?? '').trim();
-    const dismissed = locDismissed;
     if (locTimer) {
       clearTimeout(locTimer);
       locTimer = undefined;
     }
-    if (dismissed || q.length < 2) {
+    if (locDismissed || q.length < 2 || containsHttpUrl(q)) {
       locHits = [];
       return;
     }
@@ -321,10 +326,7 @@
           locHits = [];
         });
     }, 300);
-    return () => {
-      if (locTimer) clearTimeout(locTimer);
-    };
-  });
+  }
 
   function pickPlace(h: PlaceHit) {
     value.location = h.label;
@@ -427,7 +429,10 @@
         ?? panelEl?.querySelector<HTMLElement>('[role="option"]');
       (option ?? titleEl)?.focus();
     } else titleEl?.focus();
-    return () => ro.disconnect();
+    return () => {
+      ro.disconnect();
+      if (locTimer) clearTimeout(locTimer);
+    };
   });
 
   /** Moving the start date takes the end date with it, keeping the span.
@@ -795,6 +800,7 @@
         oninput={() => {
           locDismissed = false;
           locHi = -1;
+          schedulePlaceSearch();
         }}
         onkeydown={(e) => {
           if (e.key === 'ArrowDown' && locHits.length > 0) {
@@ -815,14 +821,16 @@
             return;
           }
           if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
-            e.preventDefault();
             const typed = (value.location ?? '').trim();
             const picked = locHi >= 0
               ? locHits[locHi]
               : locHits.length === 1 && locHits[0].label !== typed
                 ? locHits[0]
                 : undefined;
-            if (picked) pickPlace(picked);
+            if (picked) {
+              e.preventDefault();
+              pickPlace(picked);
+            }
           }
         }}
       />

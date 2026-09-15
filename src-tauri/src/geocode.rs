@@ -17,8 +17,15 @@ pub struct PlaceHit {
     pub source: &'static str,
 }
 
-pub(crate) fn may_fetch_photon(demo: bool) -> bool {
-    !demo
+pub(crate) fn may_fetch_photon(demo: bool, enabled: bool) -> bool {
+    !demo && enabled
+}
+
+/// Any `http://` / `https://` in the query — meeting links with passcodes,
+/// map pins, tickets. History can still match; Photon never sees these.
+pub(crate) fn query_has_url(q: &str) -> bool {
+    let lower = q.to_ascii_lowercase();
+    lower.contains("https://") || lower.contains("http://")
 }
 
 /// Two characters before anything shows — one letter matches half a city
@@ -58,16 +65,13 @@ pub(crate) fn merge_places(
 /// Photon demo ToS: light personal use; `limit=8` is the politeness layer
 /// on the URL itself. Spaces and the rest percent-encoded the same way
 /// weather.rs encodes a city name — a crate for this would be a crate for
-/// spaces.
-pub(crate) fn photon_url(q: &str, coords: Option<(f64, f64)>) -> String {
-    let mut url = format!(
+/// spaces. No `lat`/`lon` bias: home coordinates plus the query is fairly
+/// identifying, and nearby ranking is not worth that.
+pub(crate) fn photon_url(q: &str) -> String {
+    format!(
         "https://photon.komoot.io/api?q={}&limit=8&lang=en",
         percent_encode(q)
-    );
-    if let Some((lat, lon)) = coords {
-        url.push_str(&format!("&lat={lat}&lon={lon}"));
-    }
-    url
+    )
 }
 
 fn percent_encode(s: &str) -> String {
@@ -80,15 +84,6 @@ fn percent_encode(s: &str) -> String {
             }
         })
         .collect()
-}
-
-/// `lat,lon|Name` as weather.rs writes `weather_coords`. Used only as a
-/// Photon bias; a miss is unbiased search, never a fetch of wttr.in on
-/// every keystroke.
-pub(crate) fn parse_coords_cache(v: &str) -> Option<(f64, f64)> {
-    let (coords, _) = v.split_once('|')?;
-    let (a, b) = coords.split_once(',')?;
-    Some((a.parse().ok()?, b.parse().ok()?))
 }
 
 const DEMO_LABELS: &[&str] = &[
@@ -113,21 +108,6 @@ pub(crate) fn demo_canned(query: &str) -> Vec<PlaceHit> {
             source: "search",
         })
         .collect()
-}
-
-async fn bias_coords(pool: &sqlx::SqlitePool) -> Option<(f64, f64)> {
-    if let Some(home) = std::env::var_os("HOME") {
-        let p = std::path::Path::new(&home).join(".local/state/omarchy/settings/weather.json");
-        if let Ok(raw) = tokio::fs::read_to_string(&p).await {
-            if let Some((Some(coords), _)) = crate::weather::parse_omarchy_location(&raw) {
-                return Some(coords);
-            }
-        }
-    }
-    crate::settings::read(pool, "weather_coords")
-        .await
-        .as_deref()
-        .and_then(parse_coords_cache)
 }
 
 async fn fetch_photon(url: &str) -> anyhow::Result<String> {
@@ -166,11 +146,18 @@ pub async fn search_places(
             source: "history",
         })
         .collect::<Vec<_>>();
-    if !may_fetch_photon(state.demo) {
-        return Ok(merge_places(q, &history, &demo_canned(q), 8));
+    let enabled = crate::settings::photon_places(&state.pool).await;
+    if !may_fetch_photon(state.demo, enabled) || query_has_url(q) {
+        // Demo stands in for Photon only when the user opted in and the
+        // query is not a URL — the same two gates as a real fetch.
+        let remote = if state.demo && enabled && !query_has_url(q) {
+            demo_canned(q)
+        } else {
+            Vec::new()
+        };
+        return Ok(merge_places(q, &history, &remote, 8));
     }
-    let coords = bias_coords(&state.pool).await;
-    let url = photon_url(q, coords);
+    let url = photon_url(q);
     let remote = match fetch_photon(&url).await {
         Ok(raw) => parse_photon(&raw).unwrap_or_default(),
         Err(e) => {
@@ -296,9 +283,26 @@ mod tests {
     }
 
     #[test]
-    fn may_fetch_photon_is_off_in_demo() {
-        assert!(may_fetch_photon(false));
-        assert!(!may_fetch_photon(true));
+    fn may_fetch_photon_is_off_until_opted_in_and_off_in_demo() {
+        // Absent / off is every install that predates the setting, and
+        // Photon's public server asks for light personal use — so the
+        // network hop stays behind an explicit on.
+        assert!(!may_fetch_photon(false, false));
+        assert!(may_fetch_photon(false, true));
+        assert!(!may_fetch_photon(true, true));
+        assert!(!may_fetch_photon(true, false));
+    }
+
+    #[test]
+    fn a_url_in_the_query_never_goes_to_photon() {
+        // Zoom/Teams passcodes ride in Location; a map pin is a URL too.
+        // History can still match locally; the remote hop is the leak.
+        assert!(query_has_url("https://us02web.zoom.us/j/123?pwd=secret"));
+        assert!(query_has_url("Join at HTTP://meet.google.com/abc"));
+        assert!(query_has_url("Room 4A, https://maps.example.com/pin"));
+        assert!(!query_has_url("Room 4A"));
+        assert!(!query_has_url("http"));
+        assert!(!query_has_url("zoom.us/j/123"));
     }
 
     fn hit(source: &'static str, label: &str) -> PlaceHit {
@@ -340,19 +344,16 @@ mod tests {
     }
 
     #[test]
-    fn photon_url_encodes_the_query_and_pins_limit() {
+    fn photon_url_encodes_the_query_and_pins_limit_without_a_location_bias() {
+        let url = photon_url("Banbury Golf Course");
         assert_eq!(
-            photon_url("Banbury Golf Course", None),
+            url,
             "https://photon.komoot.io/api?q=Banbury%20Golf%20Course&limit=8&lang=en"
         );
-    }
-
-    #[test]
-    fn photon_url_appends_bias_when_coords_are_known() {
-        let url = photon_url("Eagle", Some((43.6954, -116.354)));
-        assert!(url.starts_with("https://photon.komoot.io/api?q=Eagle&limit=8&lang=en"));
-        assert!(url.contains("&lat=43.6954"));
-        assert!(url.contains("&lon=-116.354"));
+        // Home coordinates plus the query is fairly identifying. The
+        // request is the typed name only.
+        assert!(!url.contains("lat="));
+        assert!(!url.contains("lon="));
     }
 
     #[test]
@@ -367,12 +368,4 @@ mod tests {
         assert!(demo_canned("room").iter().any(|h| h.label.contains("Room 4A")));
     }
 
-    #[test]
-    fn weather_coords_cache_parses_lat_lon() {
-        assert_eq!(
-            parse_coords_cache("43.6954,-116.354|Eagle"),
-            Some((43.6954, -116.354))
-        );
-        assert_eq!(parse_coords_cache("junk"), None);
-    }
 }

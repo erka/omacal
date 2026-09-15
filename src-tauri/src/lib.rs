@@ -1712,6 +1712,7 @@ pub fn run() {
             settings::set_window_frame,
             settings::set_start_on_login,
             settings::set_weather_enabled,
+            settings::set_photon_places,
             settings::set_display_timezone,
             settings::set_second_timezone,
             settings::list_timezones,

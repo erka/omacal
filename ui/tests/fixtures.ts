@@ -3208,6 +3208,17 @@ export const FIXTURES: Record<string, Record<string, any>> = {
       })),
       calendars: FORM_TWO_ACCOUNT_CALENDARS,
     },
+    // An edit whose location is already filled — what used to fire Photon
+    // 300 ms after open, before anyone typed. The value is a real place
+    // (two characters or more) so a search-on-mount would have something
+    // to send.
+    'edit-with-place': {
+      anchor: ANCHOR,
+      initial: editing(detail({
+        id: 19, title: 'Review', location: 'Room 4A', can_edit: true,
+      })),
+      calendars: FORM_CALENDARS,
+    },
     // An edit on an account with exactly one writable calendar: there is
     // nowhere to move it, so the picker stays disabled and says why.
     'edit-only-one-calendar': {

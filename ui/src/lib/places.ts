@@ -1,8 +1,9 @@
 // ui/src/lib/places.ts
 //
-// The Location field's autocomplete. Recent event locations plus Photon
-// hits, distilled on the Rust side so the webview never talks to the
-// internet. See `search_places` in `src-tauri/src/geocode.rs`.
+// The Location field's autocomplete. Recent event locations plus, when
+// the Photon setting is on, remote hits — distilled on the Rust side so
+// the webview never talks to the internet. See `search_places` in
+// `src-tauri/src/geocode.rs`.
 
 import { invoke } from '@tauri-apps/api/core';
 

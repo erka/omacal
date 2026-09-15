@@ -70,6 +70,7 @@ const TRAY_ICON_KEY: &str = "tray_icon";
 const QUIT_ON_CLOSE_KEY: &str = "quit_on_close";
 const AUTOSTART_KEY: &str = "autostart";
 const WEATHER_KEY: &str = "weather_enabled";
+const PHOTON_PLACES_KEY: &str = "photon_places";
 const APPEARANCE_KEY: &str = "appearance";
 const WINDOW_FRAME_KEY: &str = "window_frame";
 pub(crate) const TEMPERATURE_UNIT_KEY: &str = "temperature_unit";
@@ -581,6 +582,11 @@ pub struct AppSettings {
     /// destination beyond the calendar providers, which is why the off
     /// switch exists and the settings hint names where the data comes from.
     pub weather_enabled: bool,
+    /// Whether the Location field asks Photon (OpenStreetMap) for place
+    /// suggestions. **Off by default**: the query leaves the machine, and
+    /// Photon's public server asks for light personal use. History
+    /// suggestions stay on regardless — they never leave the machine.
+    pub photon_places: bool,
     /// Whether the day headers' forecast high is drawn in Celsius or
     /// Fahrenheit — Celsius by default, so no installed copy changes under
     /// its user. Read by the same components as `weather_enabled` guards,
@@ -896,6 +902,10 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
         // `notifications_enabled`'s polarity and reasoning: on unless
         // somebody turned it off.
         weather_enabled: weather_enabled(pool).await,
+        // Off unless this version wrote `"1"`: every install that predates
+        // the setting must keep sending only an IP to the weather service,
+        // not typed locations to a third party.
+        photon_places: photon_places(pool).await,
         // Same "only a spelling this version writes moves the setting" rule
         // as `week_start`: absent, garbage and a future spelling all land on
         // Celsius, the unit omacal has always drawn.
@@ -1063,6 +1073,15 @@ pub(crate) async fn weather_enabled(pool: &SqlitePool) -> bool {
     read(pool, WEATHER_KEY).await.map(|v| v != "0").unwrap_or(true)
 }
 
+/// Photon place suggestions, named for [`weather_enabled`]'s reason:
+/// `search_places` and `read_settings` must agree on what an absent row
+/// means. Absent is off — `list_mode`'s polarity, for the opposite of
+/// weather's reason: a forecast nobody asked to lose is decoration; a
+/// typed location sent off-machine is not.
+pub(crate) async fn photon_places(pool: &SqlitePool) -> bool {
+    read(pool, PHOTON_PLACES_KEY).await.map(|v| v == "1").unwrap_or(false)
+}
+
 /// Which palette to wear (issue #30), named for [`weather_enabled`]'s reason:
 /// `get_palette`, `setup`'s GTK hint and the theme watcher all need the
 /// answer, and three parses of one row is three chances to disagree about
@@ -1139,6 +1158,19 @@ pub async fn set_weather_enabled(
     if on {
         crate::weather::refresh_soon(app, state.pool.clone(), state.demo, true);
     }
+    Ok(read_settings(&state.pool).await)
+}
+
+/// Stores whether Photon may be queried from the Location field. History
+/// suggestions ignore this — they are a local SELECT.
+#[tauri::command]
+pub async fn set_photon_places(
+    state: tauri::State<'_, AppState>,
+    on: bool,
+) -> Result<AppSettings, String> {
+    write(&state.pool, PHOTON_PLACES_KEY, if on { "1" } else { "0" })
+        .await
+        .map_err(|e| crate::errors::user_facing(&e))?;
     Ok(read_settings(&state.pool).await)
 }
 
