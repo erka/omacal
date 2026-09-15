@@ -312,8 +312,18 @@
    *  every wheel event forced a layout per event on top of the one the
    *  move itself cost — the lag (2026-09-03). */
   let panColWidth = 0;
-  /** The last wheel events, for the speed at lift. */
+  /** The last wheel events, for the speed at lift. Timed by each event's
+   *  own `timeStamp`, when the input happened, not by when this handler got
+   *  to run: under load (a balanced power profile, 2026-09-15) the events
+   *  are handled in bursts, and handler time made a steady swipe look
+   *  jerky, so the strong/gentle call and the glide came out random. */
   let panSamples: PanSample[] = [];
+  /** Travel gathered from a gesture's wheel events, applied once per frame
+   *  (`flushPan`) however many arrive in it; a touchpad sends about two a
+   *  frame. The gesture's first event applies at once, so a lone event
+   *  moves the track immediately. */
+  let panPending = 0;
+  let panFrame = 0;
   /** Columns handed up since the gesture began, in pan units. With `panDays`
    *  it is the gesture's whole travel, which is what the settle is decided
    *  on: `panDays` alone forgets every column already crossed. */
@@ -364,7 +374,7 @@
   function endTouchPan(e: PointerEvent) {
     if (e.pointerType !== 'touch') return;
     touchDown = false;
-    touchLiftAt = performance.now();
+    touchLiftAt = Number.isFinite(e.timeStamp) && e.timeStamp > 0 ? e.timeStamp : performance.now();
     if (panActive && !panSettling) {
       clearTimeout(panLull);
       settlePan();
@@ -376,6 +386,7 @@
    *  whole days handed up as their columns pass. */
   function settlePan() {
     clearTimeout(panLull);
+    flushPan();
     if (panColWidth <= 0) {
       panDays = 0;
       panActive = false;
@@ -418,6 +429,38 @@
       panActive = false;
     };
     snapRaf = requestAnimationFrame(step);
+  }
+
+  /** Moves the track by `days` of travel, handing up whole columns as they
+   *  are crossed. Both in one flush: the window moves a day and the track
+   *  moves back a column, and the day under the finger stays where it is. */
+  function movePan(days: number) {
+    panDays += days;
+    const { shift, rest } = panCommit(panDays);
+    if (shift !== 0) {
+      panDays = rest;
+      panHanded -= shift;
+      onpan?.(shift);
+    }
+  }
+
+  /** The frame's gathered travel, applied once. */
+  function flushPan() {
+    cancelAnimationFrame(panFrame);
+    panFrame = 0;
+    if (panPending === 0) return;
+    const days = panPending;
+    panPending = 0;
+    movePan(days);
+  }
+
+  /** When an input event happened, on `performance.now()`'s clock. A
+   *  timestamp that is missing, zero or older than the last sample (an engine
+   *  that does not carry the platform's time) falls back to now. */
+  function eventTime(e: Event): number {
+    const t = e.timeStamp;
+    const last = panSamples[panSamples.length - 1]?.t ?? -Infinity;
+    return Number.isFinite(t) && t > 0 && t >= last && t <= performance.now() + 1 ? t : performance.now();
   }
 
   /** A sideways swipe has begun, so whatever a press inside the grid had
@@ -601,6 +644,12 @@
    *  the window, zero at rest because none are drawn. */
   const renderedDays = $derived(panActive ? effectiveDays : effectiveDays.slice(visStart, visStart + visible));
   const renderVis = $derived(panActive ? visStart : 0);
+  /** The track's offset while sliding: the window's first day at the pane's
+   *  edge plus the fraction of a column the gesture has moved it. Inline and
+   *  on `.cols` only, so a frame of panning restyles one element. */
+  const trackTransform = $derived(
+    panActive ? `translateX(${((panDays - renderVis) / renderedDays.length) * 100}%)` : undefined,
+  );
   /** The band's rows while sliding: packed for the window the gesture began
    *  on and held for its whole length — re-packing per day crossed would
    *  reshuffle rows under the swipe — and only re-packed when the payload
@@ -1529,7 +1578,8 @@
     // Read as travel it threw the track days the wrong way, and fed the
     // same wrong speed to the settle. `endTouchPan` has already ended the
     // gesture; this only keeps the event from reaching anything else.
-    if (performance.now() - touchLiftAt < TOUCH_LIFT_WHEEL_MS) {
+    const at = Number.isFinite(e.timeStamp) && e.timeStamp > 0 ? e.timeStamp : performance.now();
+    if (Math.abs(at - touchLiftAt) < TOUCH_LIFT_WHEEL_MS) {
       if (sideways || panActive) e.preventDefault();
       return;
     }
@@ -1540,6 +1590,9 @@
       // A new gesture, from rest or from inside a settle it interrupts.
       if (!panActive) panColWidth = colWidth();
       cancelAnimationFrame(snapRaf);
+      cancelAnimationFrame(panFrame);
+      panFrame = 0;
+      panPending = 0;
       panSettling = false;
       panHanded = 0;
       panSamples = [];
@@ -1549,16 +1602,13 @@
     if (panColWidth <= 0) return;
     panActive = true;
     const days = -(e.deltaX * (panTouch ? 1 : PAN_GAIN)) / panColWidth;
-    panDays += days;
-    panSamples.push({ t: performance.now(), days });
+    panSamples.push({ t: eventTime(e), days });
     if (panSamples.length > 12) panSamples.shift();
-    const { shift, rest } = panCommit(panDays);
-    if (shift !== 0) {
-      // Both in one flush: the window moves a day and the track moves back
-      // a column, and the day under the finger stays where it is.
-      panDays = rest;
-      panHanded -= shift;
-      onpan(shift);
+    if (!tracking) {
+      movePan(days);
+    } else {
+      panPending += days;
+      if (!panFrame) panFrame = requestAnimationFrame(flushPan);
     }
     clearTimeout(panLull);
     panLull = setTimeout(settlePan, PAN_LULL_MS);
@@ -1570,7 +1620,7 @@
   onblur={() => { altHeld = false; }}
   bind:innerWidth={viewportWidth} bind:innerHeight={viewportHeight} />
 
-<div class="grid" style="--cols:{renderedDays.length}; --visible:{visible}; --vis:{renderVis}; --pan:{panDays}; --gutter:{gutterWidth()}" onwheel={wheelPan} onpointerdowncapture={notePress}>
+<div class="grid" style="--cols:{renderedDays.length}; --visible:{visible}; --gutter:{gutterWidth()}" onwheel={wheelPan} onpointerdowncapture={notePress}>
   <div class="gutter head">
     {#if secondZone()}
       <!-- Which clock is which, Google's own layout: the convenience zone in
@@ -1581,7 +1631,7 @@
       <span class="zl z1">{zoneAbbrev(primaryZone)}</span>
     {/if}
   </div>
-  <div class="track"><div class="cols" class:sliding={panActive}>
+  <div class="track"><div class="cols" class:sliding={panActive} style:transform={trackTransform}>
   {#each renderedDays as d (d.start_ms)}
     <div class="head" class:today={d.start_ms === todayStart}
          class:keyboard={keyboardCursor?.dayStartMs === d.start_ms}>
@@ -1684,7 +1734,7 @@
   onopen={openPopover}
 />
 
-<div class="grid body quiet-scroll" class:creating={createMode} style="--cols:{renderedDays.length}; --visible:{visible}; --vis:{renderVis}; --pan:{panDays}; --gutter:{gutterWidth()}; --hour-px:{Math.round(hourPx)}px" bind:this={bodyEl} data-testid="week-body" onwheel={wheelPan} onpointerdowncapture={notePress}>
+<div class="grid body quiet-scroll" class:creating={createMode} style="--cols:{renderedDays.length}; --visible:{visible}; --gutter:{gutterWidth()}; --hour-px:{Math.round(hourPx)}px" bind:this={bodyEl} data-testid="week-body" onwheel={wheelPan} onpointerdowncapture={notePress}>
   <div class="hour-crop ruler" style:height={`${visibleHeight}px`}><div class="gutter" style={columnStyle(gutterDay)}>
     {#each HOURS as h}
       {#if secondZone()}
@@ -1698,7 +1748,7 @@
     {/each}
   </div></div>
 
-  <div class="track"><div class="cols" class:sliding={panActive}>
+  <div class="track"><div class="cols" class:sliding={panActive} style:transform={trackTransform}>
   {#each renderedDays as day, dayIndex (day.start_ms)}
     {@const isToday = day.start_ms === todayStart}
     {@const ghost = sweepStyle(day)}
@@ -1892,8 +1942,12 @@
      its duration. At rest there is no transform at all and the window's
      first column sits at the track's edge by construction. The percentage
      is of `.cols`' own width, `--cols` columns wide. */
-  .cols.sliding { transform: translateX(calc((var(--pan) - var(--vis)) / var(--cols) * 100%));
-                  will-change: transform; }
+  /* The offset itself is set inline (`trackTransform`), on this element
+     alone. It used to be custom properties on the grid's root, and a custom
+     property inherits: every wheel event restyled every column, hour rule
+     and block beneath it, 10–15 ms an event at a quarter of this laptop's
+     speed, which is what a balanced power profile felt like (2026-09-15). */
+  .cols.sliding { will-change: transform; }
   .cols.sliding :global(.tip) { display: none; }
   /* The last of this component's three roots, and the only one that stretches:
      the day-name row and the all-day band above it are content-sized, so
