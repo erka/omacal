@@ -5309,6 +5309,16 @@ test.describe("App: showing today's date", () => {
     await modal.getByRole('tab', { name: 'About' }).click();
 
     const pane = modal.getByRole('tabpanel', { name: 'About' });
+    // The app icon (#128), and painted rather than merely present: a visible
+    // box can still be clipped or covered, so ask what is at its centre.
+    const mark = pane.getByRole('img', { name: 'OmaCal' });
+    await expect(mark).toBeVisible();
+    const box = await mark.boundingBox();
+    expect(box!.width).toBeGreaterThanOrEqual(64);
+    const painted = await page.evaluate(({ x, y }) =>
+      document.elementFromPoint(x, y)?.closest('svg')?.getAttribute('aria-label') ?? null,
+    { x: box!.x + box!.width / 2, y: box!.y + box!.height / 2 });
+    expect(painted).toBe('OmaCal');
     await expect(pane).toContainText('Extreme Labs');
     await expect(pane).toContainText('open source');
     await expect(pane).toContainText('Pull requests, issues and feedback are all welcome.');

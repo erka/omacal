@@ -1627,6 +1627,17 @@
 
     {:else if pane === 'About'}
       <div class="about">
+        <!-- The app icon (#128), drawn inline rather than as an <img>: Vite
+             inlines a file this small as a data: URI, which the CSP's
+             `img-src 'self'` refuses, so an import would paint nothing. The
+             shapes are src-tauri/icons/icon.svg's; change both together. -->
+        <svg class="mark" viewBox="0 0 512 512" role="img" aria-label="OmaCal">
+          <rect x="16" y="16" width="480" height="480" rx="112" fill="#0F1420" />
+          <rect x="112" y="150" width="288" height="48" rx="24" fill="#8DA9F0" />
+          <circle cx="136" cy="256" r="24" fill="#F97316" />
+          <rect x="184" y="232" width="216" height="48" rx="24" fill="#8DA9F0" />
+          <rect x="112" y="314" width="192" height="48" rx="24" fill="#8DA9F0" />
+        </svg>
         <p>
           OmaCal is a native desktop calendar for Google Calendar, iCloud and
           any CalDAV server. Your events live in a database on this machine and
@@ -1743,7 +1754,10 @@
   .hint a { color: var(--accent); }
   /* Prose, not controls: a reading measure and room to breathe, unlike the
      dense label-and-field rows every other pane is made of. */
-  .about p { margin: 0 0 14px; max-width: 52ch; line-height: 1.55; }
+  /* One centred column under the icon, the shape the request drew. */
+  .about { max-width: 52ch; margin: 0 auto; }
+  .about .mark { display: block; width: 96px; height: 96px; margin: 8px auto 20px; }
+  .about p { margin: 0 0 14px; line-height: 1.55; }
   .about .links { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 4px; }
   .about a { color: var(--accent); }
   .appearance-section { align-self: stretch; display: flex; flex-direction: column;
