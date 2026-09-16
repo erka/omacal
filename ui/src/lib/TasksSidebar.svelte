@@ -4,7 +4,7 @@
   import DateField from './DateField.svelte';
   import { clockFormat } from './clock.svelte';
   import {
-    createTask, deleteTask, listTasks, setTaskCompleted, taskLists, updateTask,
+    createLocalTaskList, createTask, deleteTask, listTasks, setTaskCompleted, taskLists, updateTask,
     type Task, type TaskList,
   } from './tasks';
   import { TASKS_WIDTH_DEFAULT, TASKS_WIDTH_MAX, TASKS_WIDTH_MIN, clampTasksWidth } from './taskwidth';
@@ -94,6 +94,24 @@
    *  midnight, and a list that reshuffles under a reader is worse than one
    *  that is a few hours stale until the next sync. */
   let nowMs = $state(Date.now());
+
+  /** Whether the on-this-device list is being made, so the button cannot be
+   *  pressed twice into two lists. (The backend is idempotent as well.) */
+  let making = $state(false);
+
+  async function makeLocalList() {
+    if (making) return;
+    making = true;
+    note = null;
+    try {
+      lists = await createLocalTaskList();
+      await load();
+    } catch (e) {
+      note = String(e);
+    } finally {
+      making = false;
+    }
+  }
 
   async function load() {
     try {
@@ -266,10 +284,24 @@
     {#if tasks === null}
       <p class="empty">Loading…</p>
     {:else if tasks.length === 0}
-      <p class="empty">
-        No tasks yet. Task lists arrive with an iCloud or CalDAV account
-        (Settings → Accounts).
-      </p>
+      <!-- Two different nothings. With a list, the pane is empty because
+           nothing is due; with none, it is empty because there is nowhere to
+           put a task — and a Google account never brings one, since Google
+           keeps tasks in another product. The button is the way out that
+           needs no server at all. -->
+      {#if lists.length > 0}
+        <p class="empty">No tasks yet.</p>
+      {:else}
+        <p class="empty">
+          No task lists yet. Keep them on this machine, or connect an iCloud
+          or CalDAV account (Settings → Accounts) to keep them on a server.
+        </p>
+        <div class="empty-do">
+          <button type="button" class="make" onclick={makeLocalList} disabled={making}>
+            {making ? 'Creating…' : 'Create a list on this device'}
+          </button>
+        </div>
+      {/if}
     {:else}
       {#each groups as g (g.key)}
         <div class="head">
@@ -391,6 +423,12 @@
     background: var(--accent); }
   .resize:focus-visible { outline: none; }
   .top { display: flex; align-items: center; gap: 8px; padding: 12px 10px 10px 14px; }
+  .empty-do { padding: 0 14px 14px; }
+  .make { font: inherit; font-size: 12px; cursor: pointer; color: var(--text);
+          background: color-mix(in srgb, var(--text) 6%, transparent);
+          border: 1px solid var(--hairline); border-radius: 7px; padding: 6px 10px; }
+  .make:hover:not(:disabled) { background: color-mix(in srgb, var(--text) 10%, transparent); }
+  .make:disabled { opacity: 0.6; cursor: default; }
   h2 { margin: 0; font-size: 13px; font-weight: 600; color: var(--text); }
   .flex { flex-grow: 1; }
   .seg { display: flex; gap: 2px; background: color-mix(in srgb, var(--text) 4%, transparent);

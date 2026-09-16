@@ -98,6 +98,12 @@ export function byAccount(cals: Calendar[]): Array<{ id: number; label: string; 
     const g = groups.get(c.account_id);
     if (g) g.calendars.push(c);
     else {
+      // The on-this-device lists belong to no server, so there is no address
+      // to name beside the provider — the label is the whole answer.
+      if (c.provider === 'local') {
+        groups.set(c.account_id, { id: c.account_id, label: 'On this device', calendars: [c] });
+        continue;
+      }
       const provider = c.provider === 'google' ? 'Google' : c.provider === 'caldav' ? 'CalDAV' : c.provider;
       groups.set(c.account_id, { id: c.account_id,
         label: `${provider} · ${c.account_email}`, calendars: [c] });

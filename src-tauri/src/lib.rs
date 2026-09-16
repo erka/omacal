@@ -1725,6 +1725,7 @@ pub fn run() {
             tasks::create_task,
             tasks::delete_task_cmd,
             tasks::task_lists,
+            tasks::create_local_task_list,
             settings::set_list_mode,
             settings::set_hour_height,
             settings::set_tasks_width,

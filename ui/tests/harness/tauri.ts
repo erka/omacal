@@ -22,7 +22,7 @@ import type { TemperatureUnit } from '../../src/lib/temperature';
 import { sliceWeek } from '../../src/lib/weekwindow';
 import {
   labelledWeek, weekLabel, APP_FIVE_MIN_AGO, APP_NOW, APP_SERIES_ID, APP_SERIES_OCCURRENCE,
-  TASK_LISTS, TASKS, IMPORT_PLANS,
+  LOCAL_TASK_LIST, TASK_LISTS, TASKS, IMPORT_PLANS,
   APP_ONE_OFF_ID, APP_ONE_OFF_START, APP_GUESTS_ID, APP_SOLO_SERIES_ID,
   POPOVER_DETAILS, busyDayMonth,
   appWritableWeek, APP_WRITE_CALENDARS, APP_WEATHER, CREATED_DETAIL, crossZoneWeek,
@@ -61,6 +61,9 @@ export type Harness = {
   release(weekStartMs: number): Promise<void>;
   /** Make the next `get_week` reject, whoever asks for it. */
   failNextWeek(message: string): void;
+  /** Start with no task lists and no tasks: the Google-only install, which
+   *  has nowhere to put a task until `create_local_task_list` makes one. */
+  noTaskLists(): void;
   /** Make the next `update_event` reject — what a drag spec uses to prove a
    *  failed write is reported rather than silently swallowed. */
   failNextUpdate(message: string): void;
@@ -233,6 +236,10 @@ const harness: Harness = {
   },
   failNextWeek(message) {
     failWeekOnce = message;
+  },
+  noTaskLists() {
+    taskLists = [];
+    taskRows = [];
   },
   failNextCreate(message) {
     failCreateOnce = message;
@@ -659,6 +666,10 @@ type StubSettings = {
 
 /** The stub's task rows, mutable for the life of the page. */
 let taskRows: typeof TASKS = [...TASKS];
+/** The stub's task lists. Mutable because an install can now make one
+ *  (`create_local_task_list`), and `__harness.noTaskLists()` starts with
+ *  none — the Google-only install the button exists for. */
+let taskLists: typeof TASK_LISTS = [...TASK_LISTS];
 
 const SETTINGS_KEY = 'omacal-stub-settings';
 
@@ -1291,10 +1302,16 @@ export function installTauriStub(scenario: string): Harness {
       case 'list_tasks':
         return taskRows;
       case 'task_lists':
-        return TASK_LISTS;
+        return taskLists;
+      case 'create_local_task_list':
+        // Idempotent, as the backend's own `ensure_local_task_list` is.
+        if (!taskLists.some((l) => l.calendarId === LOCAL_TASK_LIST.calendarId)) {
+          taskLists = [...taskLists, LOCAL_TASK_LIST];
+        }
+        return taskLists;
       case 'create_task': {
         const listId = args.calendarId as number;
-        const list = TASK_LISTS.find((l) => l.calendarId === listId)!;
+        const list = taskLists.find((l) => l.calendarId === listId)!;
         taskRows = [...taskRows, {
           id: 900 + taskRows.length, calendarId: listId, summary: args.summary as string,
           notes: null, dueMs: null, dueAllDay: false, completed: false,

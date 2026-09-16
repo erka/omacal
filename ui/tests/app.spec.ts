@@ -5619,6 +5619,38 @@ test.describe('the tasks sidebar', () => {
     await expect.poll(async () => (await widthCalls(page)).at(-1)).toBe(220);
   });
 
+  /** **A Google-only install can still have tasks** (Plamen, 2026-09-16).
+   *  Google keeps tasks in another product with another API, so such an
+   *  install had a pane that could never hold one and no way to make a list.
+   *  The empty state now offers one that lives on this machine. */
+  test('with no task lists at all, the pane offers one on this device', async ({ page }) => {
+    await page.clock.setFixedTime(APP_NOW);
+    await page.goto(app());
+    await page.evaluate(() => window.__harness.noTaskLists());
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Tasks…' }).click();
+    const side = page.getByRole('complementary', { name: 'Tasks' });
+    await expect(side).toContainText('No task lists yet');
+    // The add field is not offered while there is nowhere to put a task.
+    await expect(side.getByPlaceholder('Add a task…')).toHaveCount(0);
+
+    await side.getByRole('button', { name: 'Create a list on this device' }).click();
+
+    // The list arrives, the button goes, and the field is there to type in.
+    await expect(side.getByPlaceholder('Add a task…')).toBeVisible();
+    await expect(side.getByRole('button', { name: 'Create a list on this device' })).toHaveCount(0);
+    await expect(side).toContainText('No tasks yet.');
+
+    // And it is a working list: a task lands on it.
+    await side.getByPlaceholder('Add a task…').fill('Water the plants');
+    await side.getByPlaceholder('Add a task…').press('Enter');
+    await expect(side.getByText('Water the plants')).toBeVisible();
+    const created = await page.evaluate(() => window.__harness.calls
+      .filter((c) => c.cmd === 'create_task')
+      .map((c) => (c.args as { calendarId: number }).calendarId));
+    expect(created).toEqual([77]);
+  });
+
   /** One control, one job: the rows regroup and nothing else changes. */
   test('the grouping swaps between By when and By list', async ({ page }) => {
     const side = await openTasks(page);

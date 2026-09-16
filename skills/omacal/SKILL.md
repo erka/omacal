@@ -165,13 +165,15 @@ When showing the calendar to the user (not piping into a script):
   calendars --json` shows what is hidden.
 - Times are in the user's display zone; trust `start`/`end` for prose and
   `startMs`/`endMs` for arithmetic.
-- Tasks are VTODOs on an iCloud or CalDAV list; a Google-only account has
-  none, and `omacal tasks` printing nothing means that rather than a clear
-  plate. `due` is a bare date when the task has no hour and an instant when
-  it has one — do not invent an hour for one that has none. `overdue` is
-  already computed; say a task is late rather than working it out from the
-  date. Adding needs a list: omit `--list` and it lands on the first one,
-  which `omacal tasks` names in each row.
+- Tasks are VTODOs on an iCloud or CalDAV list, or on a list kept on this
+  machine (v4.1+: Tasks pane → "Create a list on this device", since Google
+  keeps tasks in another product). `omacal tasks` printing nothing can mean
+  an account with no task list at all rather than a clear plate — say which
+  before congratulating anybody. `due` is a bare date when the task has no
+  hour and an instant when it has one — do not invent an hour for one that
+  has none. `overdue` is already computed; say a task is late rather than
+  working it out from the date. Adding needs a list: omit `--list` and it
+  lands on the first one, which `omacal tasks` names in each row.
 - Weather can be stale: `fetched_at` is when the app last reached the
   forecast, and it keeps the last good answer when offline. Check it before
   answering — past about six hours say so ("the forecast is from yesterday

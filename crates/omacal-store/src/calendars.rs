@@ -111,6 +111,85 @@ pub async fn calendar_for_write(
 }
 
 /// Show or hide a calendar. Pure display — no data is fetched or discarded.
+/// The account every on-this-device list belongs to, and the list itself.
+///
+/// A Google account brings no tasks — Google keeps those in a different
+/// product with a different API — so an install with only Google had a Tasks
+/// pane that could never hold anything (Plamen, 2026-09-16). This is the
+/// answer: a task list that belongs to no server.
+///
+/// It is an ordinary account and calendar row with `provider = 'local'`,
+/// which is what keeps the rest of the app unchanged. The sync driver picks
+/// accounts by provider name, so nothing ever tries to fetch or push these;
+/// the Tasks pane, the CLI and the store all read them as they read any
+/// other list. `sync_enabled = 0` says the same thing again, for a human
+/// reading the row.
+pub const LOCAL_PROVIDER: &str = "local";
+const LOCAL_ACCOUNT_SUB: &str = "local:device";
+const LOCAL_TASKS_ID: &str = "local:tasks";
+
+/// Creates the on-this-device task list if it is not there, and returns its
+/// calendar id either way.
+///
+/// Idempotent, because the button that calls it is a button: pressing it
+/// twice must not leave two lists with the same name, and an install that
+/// already has one must land on it.
+pub async fn ensure_local_task_list(
+    pool: &SqlitePool,
+    name: &str,
+    timezone: &str,
+    now_ms: i64,
+) -> anyhow::Result<i64> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO accounts (google_sub, email, display_name, created_at, provider)
+         VALUES (?1, ?1, 'On this device', ?2, ?3)",
+    )
+    .bind(LOCAL_ACCOUNT_SUB)
+    .bind(now_ms)
+    .bind(LOCAL_PROVIDER)
+    .execute(&mut *tx)
+    .await?;
+    let account_id: i64 =
+        sqlx::query_scalar("SELECT id FROM accounts WHERE google_sub = ?1")
+            .bind(LOCAL_ACCOUNT_SUB)
+            .fetch_one(&mut *tx)
+            .await?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO calendars
+            (account_id, google_id, summary, timezone, access_role, selected, is_primary,
+             sync_enabled, supports_events, supports_tasks)
+         VALUES (?1, ?2, ?3, ?4, 'owner', 1, 0, 0, 0, 1)",
+    )
+    .bind(account_id)
+    .bind(LOCAL_TASKS_ID)
+    .bind(name)
+    .bind(timezone)
+    .execute(&mut *tx)
+    .await?;
+    let calendar_id: i64 = sqlx::query_scalar(
+        "SELECT id FROM calendars WHERE account_id = ?1 AND google_id = ?2",
+    )
+    .bind(account_id)
+    .bind(LOCAL_TASKS_ID)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(calendar_id)
+}
+
+/// Whether this calendar is one of the on-this-device lists: the question
+/// every task write asks before reaching for a server.
+pub async fn is_local_calendar(pool: &SqlitePool, calendar_id: i64) -> anyhow::Result<bool> {
+    let provider: Option<String> = sqlx::query_scalar(
+        "SELECT a.provider FROM calendars c JOIN accounts a ON a.id = c.account_id WHERE c.id = ?1",
+    )
+    .bind(calendar_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(provider.as_deref() == Some(LOCAL_PROVIDER))
+}
+
 pub async fn set_selected(pool: &SqlitePool, id: i64, on: bool) -> anyhow::Result<()> {
     sqlx::query("UPDATE calendars SET selected = ?2 WHERE id = ?1")
         .bind(id)

@@ -2064,10 +2064,14 @@ export const crossZoneWeek = (): WeekPayload => structuredClone(XZONE_GOLDEN);
 /** Two task lists with tasks on both, which is the only shape in which a
  *  picker that filters can be told from one that does not (#68). `Work`
  *  carries a done row as well, so the Done section is filtered too. */
-export const TASK_LISTS = [
+export const TASK_LISTS: { calendarId: number; name: string; color: string | null }[] = [
   { calendarId: 1, name: 'Personal', color: '#5b8def' },
   { calendarId: 2, name: 'Work', color: '#2dd4bf' },
 ];
+
+/** The list `create_local_task_list` makes: no server behind it, which is
+ *  what a Google-only install can have (Plamen, 2026-09-16). */
+export const LOCAL_TASK_LIST = { calendarId: 77, name: 'Tasks on this device', color: null };
 export const TASKS: Task[] = [
   // Dated against `APP_NOW` (Mon 29 Jan 2024), so "By when" has an overdue
   // row, a today row and an undated one — the three groups that differ.

@@ -27,6 +27,12 @@ export type TaskList = {
 export const listTasks = () => invoke<Task[]>('list_tasks');
 export const taskLists = () => invoke<TaskList[]>('task_lists');
 
+/** Makes the on-this-device list, or finds the one already there, and
+ *  answers with the lists as the pickers see them. A Google-only install has
+ *  no task list and no way to make one: Google keeps tasks in a different
+ *  product with a different API. */
+export const createLocalTaskList = () => invoke<TaskList[]>('create_local_task_list');
+
 /** Completes (or reopens) a task — the server first, then the store, which is
  *  why the fresh list comes back from the same call. */
 export const setTaskCompleted = (id: number, on: boolean) =>

@@ -70,6 +70,30 @@ async fn client_for_task_calendar(
     Ok((client, collection_url, String::new()))
 }
 
+/// Where a task list lives.
+///
+/// A Google account brings no tasks, so an install with only Google had a
+/// pane that could never hold one (Plamen, 2026-09-16). An **on-this-device**
+/// list is the answer: the same rows, the same pane, the same CLI, with
+/// nothing on the other end. Every write below asks this first, and the only
+/// difference it makes is whether a `PUT` happens — the iCalendar text is
+/// written either way, so a list that later moves to a server moves as a
+/// copy rather than a rewrite.
+enum TaskHome {
+    /// A CalDAV collection: its client and the collection's URL.
+    Server(Box<omacal_caldav::CalDavClient>, String),
+    /// This machine.
+    Device,
+}
+
+async fn task_home(state: &AppState, calendar_id: i64) -> anyhow::Result<TaskHome> {
+    if omacal_store::is_local_calendar(&state.pool, calendar_id).await? {
+        return Ok(TaskHome::Device);
+    }
+    let (client, collection_url, _) = client_for_task_calendar(state, calendar_id).await?;
+    Ok(TaskHome::Server(Box::new(client), collection_url))
+}
+
 const TASK_CHANGED_ON_SERVER: &str =
     "That task changed on the server since it was loaded — sync and try again";
 
@@ -89,22 +113,28 @@ async fn set_completed_impl(state: &AppState, id: i64, on: bool) -> anyhow::Resu
         .await?
         .ok_or_else(|| anyhow::anyhow!(TASK_GONE))?;
     let raw = task.raw_ics.as_deref().ok_or_else(|| anyhow::anyhow!("task has no resource"))?;
-    let href = task.caldav_href.as_deref().ok_or_else(|| anyhow::anyhow!("task has no href"))?;
-    let (client, _, _) = client_for_task_calendar(state, task.calendar_id).await?;
+    let home = task_home(state, task.calendar_id).await?;
 
     let now = jiff::Timestamp::from_millisecond(crate::now_ms())?;
     let patched = omacal_caldav::patch_todo_status(raw, &task.uid, on, now)
         .ok_or_else(|| anyhow::anyhow!("could not rewrite the task's resource"))?;
 
-    let new_etag = client
-        .put(href, &patched, task.etag.as_deref())
-        .await
-        .map_err(|e| match e {
-            omacal_caldav::CalDavError::PreconditionFailed => {
-                anyhow::anyhow!(TASK_CHANGED_ON_SERVER)
-            }
-            other => anyhow::Error::from(other),
-        })?;
+    let new_etag = match &home {
+        TaskHome::Device => None,
+        TaskHome::Server(client, _) => {
+            let href = task.caldav_href.as_deref()
+                .ok_or_else(|| anyhow::anyhow!("task has no href"))?;
+            client
+                .put(href, &patched, task.etag.as_deref())
+                .await
+                .map_err(|e| match e {
+                    omacal_caldav::CalDavError::PreconditionFailed => {
+                        anyhow::anyhow!(TASK_CHANGED_ON_SERVER)
+                    }
+                    other => anyhow::Error::from(other),
+                })?
+        }
+    };
 
     let now_ms = crate::now_ms();
     omacal_store::mark_task_status(
@@ -168,8 +198,7 @@ async fn update_impl(
         .await?
         .ok_or_else(|| anyhow::anyhow!(TASK_GONE))?;
     let raw = task.raw_ics.as_deref().ok_or_else(|| anyhow::anyhow!(TASK_GONE))?;
-    let href = task.caldav_href.as_deref().ok_or_else(|| anyhow::anyhow!(TASK_GONE))?;
-    let (client, _, _) = client_for_task_calendar(state, task.calendar_id).await?;
+    let home = task_home(state, task.calendar_id).await?;
     let cal_tz: String = sqlx::query_scalar("SELECT timezone FROM calendars WHERE id = ?1")
         .bind(task.calendar_id)
         .fetch_one(&state.pool)
@@ -181,13 +210,21 @@ async fn update_impl(
     let patched = omacal_caldav::patch_todo_fields(raw, &task.uid, &edit, &cal_tz, now)
         .ok_or_else(|| anyhow::anyhow!("could not rewrite the task's resource"))?;
 
-    let new_etag = client
-        .put(href, &patched, task.etag.as_deref())
-        .await
-        .map_err(|e| match e {
-            omacal_caldav::CalDavError::PreconditionFailed => anyhow::anyhow!(TASK_CHANGED_ON_SERVER),
-            other => anyhow::Error::from(other),
-        })?;
+    let new_etag = match &home {
+        TaskHome::Device => None,
+        TaskHome::Server(client, _) => {
+            let href = task.caldav_href.as_deref().ok_or_else(|| anyhow::anyhow!(TASK_GONE))?;
+            client
+                .put(href, &patched, task.etag.as_deref())
+                .await
+                .map_err(|e| match e {
+                    omacal_caldav::CalDavError::PreconditionFailed => {
+                        anyhow::anyhow!(TASK_CHANGED_ON_SERVER)
+                    }
+                    other => anyhow::Error::from(other),
+                })?
+        }
+    };
 
     omacal_store::update_task_fields(
         &state.pool,
@@ -307,7 +344,7 @@ async fn create_impl(
     if summary.is_empty() {
         anyhow::bail!(TASK_NEEDS_A_TITLE);
     }
-    let (client, collection_url, _) = client_for_task_calendar(state, calendar_id).await?;
+    let home = task_home(state, calendar_id).await?;
     let cal_tz: String = sqlx::query_scalar("SELECT timezone FROM calendars WHERE id = ?1")
         .bind(calendar_id)
         .fetch_one(&state.pool)
@@ -332,8 +369,16 @@ async fn create_impl(
     });
     let ics = omacal_caldav::new_todo_ics(&uid, summary, due_time.as_ref(), now);
 
-    let href = format!("{}/{uid}.ics", collection_url.trim_end_matches('/'));
-    let new_etag = client.put(&href, &ics, None).await.map_err(anyhow::Error::from)?;
+    // On this device there is no resource to address, so the row carries no
+    // href — which is also what every write above reads it as.
+    let (href, new_etag) = match &home {
+        TaskHome::Device => (None, None),
+        TaskHome::Server(client, collection_url) => {
+            let href = format!("{}/{uid}.ics", collection_url.trim_end_matches('/'));
+            let etag = client.put(&href, &ics, None).await.map_err(anyhow::Error::from)?;
+            (Some(href), etag)
+        }
+    };
 
     let now_ms = crate::now_ms();
     let due = due_time.as_ref().and_then(|t| omacal_caldav::resolve(t, &cal_tz));
@@ -344,7 +389,7 @@ async fn create_impl(
             calendar_id,
             uid,
             etag: new_etag,
-            caldav_href: Some(href),
+            caldav_href: href,
             summary: Some(summary.to_string()),
             description: None,
             due_utc: due.as_ref().map(|(ms, _, _)| *ms),
@@ -376,9 +421,11 @@ async fn delete_impl(state: &AppState, id: i64) -> anyhow::Result<()> {
     let task = omacal_store::task_by_id(&state.pool, id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("that task is no longer here"))?;
-    let href = task.caldav_href.as_deref().ok_or_else(|| anyhow::anyhow!("task has no href"))?;
-    let (client, _, _) = client_for_task_calendar(state, task.calendar_id).await?;
-    client.delete(href, task.etag.as_deref()).await.map_err(anyhow::Error::from)?;
+    if let TaskHome::Server(client, _) = task_home(state, task.calendar_id).await? {
+        let href = task.caldav_href.as_deref()
+            .ok_or_else(|| anyhow::anyhow!("task has no href"))?;
+        client.delete(href, task.etag.as_deref()).await.map_err(anyhow::Error::from)?;
+    }
     omacal_store::delete_task(&state.pool, id).await?;
     crate::upcoming::refresh_soon(state.pool.clone(), state.demo);
     Ok(())
@@ -403,7 +450,7 @@ pub(crate) async fn writable_task_lists(
     let rows: Vec<(i64, String, Option<String>)> = sqlx::query_as(
         "SELECT c.id, COALESCE(c.label_override, c.summary), COALESCE(c.color_override, c.color_hex)
          FROM calendars c JOIN accounts a ON a.id = c.account_id
-         WHERE a.provider = 'caldav' AND c.supports_tasks = 1
+         WHERE a.provider IN ('caldav', 'local') AND c.supports_tasks = 1
            AND c.selected = 1 AND c.access_role != 'reader'
          ORDER BY COALESCE(c.label_override, c.summary) COLLATE NOCASE",
     )
@@ -415,6 +462,37 @@ pub(crate) async fn writable_task_lists(
         .collect())
 }
 
+/// Creates the on-this-device task list, or finds the one already there,
+/// and answers with the lists as the pickers see them.
+///
+/// The button behind this exists because a Google-only install has no task
+/// list at all and no way to make one: Google keeps tasks in another product
+/// with another API, and asking for a CalDAV account to write a shopping
+/// list is asking for a server nobody wanted (Plamen, 2026-09-16).
+///
+/// The list's zone is the display zone, which is what a due date means here:
+/// "by Thursday" is Thursday where the user is.
+#[tauri::command]
+pub async fn create_local_task_list(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<TaskListVm>, String> {
+    crate::demo_sync_guard(state.demo)?;
+    let tz = crate::settings::read_settings(&state.pool)
+        .await
+        .display_timezone
+        .unwrap_or_else(|| jiff::tz::TimeZone::system().iana_name().unwrap_or("UTC").to_string());
+    omacal_store::ensure_local_task_list(&state.pool, LOCAL_TASK_LIST_NAME, &tz, crate::now_ms())
+        .await
+        .map_err(|e| crate::errors::user_facing(&e))?;
+    writable_task_lists(&state.pool)
+        .await
+        .map_err(|e| crate::errors::user_facing(&e))
+}
+
+/// What the on-this-device list is called. Plain, because the pane already
+/// says these are tasks and the account row beside it says where they live.
+pub(crate) const LOCAL_TASK_LIST_NAME: &str = "Tasks on this device";
+
 #[tauri::command]
 pub async fn task_lists(state: tauri::State<'_, AppState>) -> Result<Vec<TaskListVm>, String> {
     writable_task_lists(&state.pool)
@@ -425,6 +503,87 @@ pub async fn task_lists(state: tauri::State<'_, AppState>) -> Result<Vec<TaskLis
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn local_state(pool: sqlx::SqlitePool) -> AppState {
+        AppState {
+            pool,
+            demo: false,
+            tokens: Default::default(),
+            reauth: Default::default(),
+            update: Default::default(),
+            update_checked_at: Default::default(),
+            system_tz_change: Default::default(),
+            quit_on_close: Default::default(),
+            open_date: Default::default(),
+        }
+    }
+
+    /// **A task list with no server behind it** (Plamen, 2026-09-16): the
+    /// whole life of one, through the same commands a CalDAV list uses. If
+    /// any of them reached for a client this would fail here rather than in
+    /// somebody's pane — there is no server, no credential and no keyring
+    /// entry anywhere in this test.
+    #[tokio::test]
+    async fn a_task_on_this_device_is_created_edited_completed_and_deleted_without_a_server() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        let list =
+            omacal_store::ensure_local_task_list(&pool, "Tasks on this device", "Europe/Sofia", 0)
+                .await
+                .unwrap();
+        let state = local_state(pool.clone());
+
+        create_impl(&state, list, "Water the plants", None, true).await.unwrap();
+        let rows = omacal_store::tasks_for_ui(&pool, 0).await.unwrap();
+        assert_eq!(rows.len(), 1, "the pane shows it, like any other list's task");
+        let task = &rows[0].task;
+        let id = task.id;
+        assert_eq!(task.summary.as_deref(), Some("Water the plants"));
+        // No resource to address, and the iCalendar text kept anyway — which
+        // is what lets this list move to a server later as a copy.
+        assert!(task.caldav_href.is_none(), "nothing to address on this device");
+        assert!(task.etag.is_none());
+        assert!(task.raw_ics.as_deref().is_some_and(|r| r.contains("BEGIN:VTODO")));
+
+        // A due date, a note and a new title, in one write.
+        let due: i64 = "2026-09-18T00:00:00+03:00".parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        update_impl(&state, id, "Water the plants twice", Some(due), true, Some("the big one"))
+            .await
+            .unwrap();
+        let t = omacal_store::task_by_id(&pool, id).await.unwrap().unwrap();
+        assert_eq!(t.summary.as_deref(), Some("Water the plants twice"));
+        assert_eq!(t.description.as_deref(), Some("the big one"));
+        assert!(t.due_utc.is_some() && t.due_all_day);
+
+        set_completed_impl(&state, id, true).await.unwrap();
+        let t = omacal_store::task_by_id(&pool, id).await.unwrap().unwrap();
+        assert_eq!(t.status, "completed");
+        assert!(t.completed_utc.is_some());
+        set_completed_impl(&state, id, false).await.unwrap();
+        assert_eq!(
+            omacal_store::task_by_id(&pool, id).await.unwrap().unwrap().status,
+            "needs-action"
+        );
+
+        delete_impl(&state, id).await.unwrap();
+        assert!(omacal_store::task_by_id(&pool, id).await.unwrap().is_none());
+    }
+
+    /// The list is offered to the pickers, and making it twice makes one.
+    #[tokio::test]
+    async fn the_on_device_list_is_offered_once_however_often_it_is_asked_for() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        let first =
+            omacal_store::ensure_local_task_list(&pool, LOCAL_TASK_LIST_NAME, "UTC", 0).await.unwrap();
+        let again =
+            omacal_store::ensure_local_task_list(&pool, LOCAL_TASK_LIST_NAME, "UTC", 1).await.unwrap();
+        assert_eq!(first, again, "one list, not two");
+
+        let lists = writable_task_lists(&pool).await.unwrap();
+        assert_eq!(lists.len(), 1);
+        assert_eq!(lists[0].calendar_id, first);
+        assert_eq!(lists[0].name, LOCAL_TASK_LIST_NAME);
+        assert!(omacal_store::is_local_calendar(&pool, first).await.unwrap());
+    }
 
     /// An all-day due date takes its date in the **calendar's** zone.
     ///
