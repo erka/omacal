@@ -713,7 +713,7 @@
   .conf { display: inline-block; color: var(--accent); font-size: 11px;
           text-decoration: none; }
   .conf:hover { text-decoration: underline; }
-  .copy-conference { font: inherit; font-size: 10.5px; cursor: copy; padding: 2px 6px; }
+  .copy-conference { appearance: none; -webkit-appearance: none; padding: 5px 8px; }
 
   /* Sits with the guest list rather than with the detail lines above it,
      because it is a reading of that list and not another fact about the
@@ -774,10 +774,11 @@
      are the pair that change the event for everybody. */
   .own { display: flex; gap: 6px; margin-top: 8px; padding-top: 8px;
          border-top: 1px solid var(--hairline); }
-  .own button { flex: 1; font: inherit; font-size: 11.5px; cursor: pointer;
-                background: none; color: var(--muted);
-                border: 1px solid var(--hairline); border-radius: 6px; padding: 5px 0; }
-  .own button:hover { color: var(--text); }
+  .own button { flex: 1; padding: 5px 0; }
+  .own button, .copy-conference { font: inherit; font-size: 11.5px; cursor: pointer;
+                                background: none; color: var(--muted);
+                                border: 1px solid var(--hairline); border-radius: 6px; }
+  .own button:hover, .copy-conference:hover { color: var(--text); }
 
   .note { font-size: 10.5px; color: var(--muted); line-height: 1.4;
           margin: 8px 0 0; padding: 6px 8px; border-radius: 5px;
