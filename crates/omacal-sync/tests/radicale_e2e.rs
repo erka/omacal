@@ -388,6 +388,81 @@ async fn the_whole_loop_against_a_real_server() {
 /// account's password out of the real keyring, none of which belongs in a
 /// test. What is exercised here is the protocol underneath it, in the same
 /// order and with the same preconditions.
+/// Makes an address book: the CardDAV half of [`mkcalendar`], and the same
+/// reason — MKCOL is not part of the app's protocol surface, so the test
+/// drives it directly.
+async fn mkaddressbook(base: &str, user: &str, name: &str) {
+    let body = format!(
+        r#"<?xml version="1.0"?>
+        <D:mkcol xmlns:D="DAV:" xmlns:CARD="urn:ietf:params:xml:ns:carddav">
+          <D:set><D:prop>
+            <D:resourcetype><D:collection/><CARD:addressbook/></D:resourcetype>
+            <D:displayname>{name}</D:displayname>
+          </D:prop></D:set>
+        </D:mkcol>"#
+    );
+    let resp = reqwest::Client::new()
+        .request(reqwest::Method::from_bytes(b"MKCOL").unwrap(), format!("{base}/{user}/{name}/"))
+        .basic_auth(user, Some("pw"))
+        .header("Content-Type", "application/xml")
+        .body(body)
+        .send()
+        .await
+        .expect("radicale reachable");
+    assert!(resp.status().is_success(), "MKCOL {name} answered {}", resp.status());
+}
+
+const CARD_ANA: &str = "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:e2e-ana\r\nFN:Ana Petrova\r\nN:Petrova;Ana;;;\r\nEMAIL;TYPE=WORK:Ana.Petrova@x.test\r\nEMAIL;TYPE=HOME:ana@home.test\r\nEND:VCARD\r\n";
+const CARD_OFFICE: &str = "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:e2e-office\r\nFN:Front desk\r\nTEL:+359888\r\nEND:VCARD\r\n";
+
+/// **#126 against a real server**: discovery finds the address book, the
+/// query brings the cards themselves back, and what reaches the store is one
+/// row per address — with the card that names nobody to invite left out.
+#[tokio::test]
+#[ignore = "needs a live Radicale on 127.0.0.1:5232"]
+async fn contacts_come_back_from_a_real_address_book() {
+    let base = base_url();
+    let user = format!("omacal-e2e-cards-{}", std::process::id());
+    mkcalendar(&base, &user, "work", "VEVENT").await;
+    mkaddressbook(&base, &user, "contacts").await;
+
+    let http = reqwest::Client::new();
+    for (name, card) in [("ana.vcf", CARD_ANA), ("office.vcf", CARD_OFFICE)] {
+        let resp = http
+            .put(format!("{base}/{user}/contacts/{name}"))
+            .basic_auth(&user, Some("pw"))
+            .header("Content-Type", "text/vcard; charset=utf-8")
+            .body(card)
+            .send()
+            .await
+            .expect("seed PUT");
+        assert!(resp.status().is_success(), "PUT {name} answered {}", resp.status());
+    }
+
+    let client = CalDavClient::new(&base, &user, "pw").expect("client");
+    let books = client.discover_address_books().await.expect("address books");
+    assert_eq!(books.len(), 1, "the calendar is not an address book: {books:?}");
+    assert!(books[0].url.ends_with("/contacts/"));
+
+    let cards = client.cards(&books[0].url).await.expect("cards");
+    assert_eq!(cards.len(), 2, "both cards, in one round trip");
+
+    let mut people: Vec<(Option<String>, String)> = cards
+        .iter()
+        .flat_map(|c| omacal_caldav::parse_cards(&c.ics))
+        .flat_map(|c| c.emails.into_iter().map(move |e| (c.name.clone(), e)))
+        .collect();
+    people.sort();
+    assert_eq!(
+        people,
+        vec![
+            (Some("Ana Petrova".into()), "ana.petrova@x.test".to_string()),
+            (Some("Ana Petrova".into()), "ana@home.test".to_string()),
+        ],
+        "one row per address, and the card with only a phone number is nobody to invite"
+    );
+}
+
 #[tokio::test]
 #[ignore = "needs a live Radicale on 127.0.0.1:5232"]
 async fn a_series_moves_between_collections_whole() {

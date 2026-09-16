@@ -15,8 +15,12 @@
 
 pub mod client;
 pub mod ics;
+pub mod vcard;
 
-pub use client::{CalDavClient, CalDavError, DiscoveredCalendar, Resource, NOT_PRIVATE_HTTP};
+pub use client::{
+    CalDavClient, CalDavError, DiscoveredAddressBook, DiscoveredCalendar, Resource, NOT_PRIVATE_HTTP,
+};
+pub use vcard::{parse_cards, Contact};
 pub use ics::{
     escape, events_in, exclude_occurrence, new_event_ics, new_todo_ics, parse, parse_time,
     patch_todo_fields, patch_todo_status, resolve, respond_all, respond_occurrence,

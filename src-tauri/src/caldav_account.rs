@@ -217,6 +217,8 @@ pub(crate) async fn sync_account(
     .await
     .map_err(anyhow::Error::from)?;
 
+    sync_contacts(pool, account_id, client).await;
+
     let mut total = 0u64;
     for (cal_id, url, ev, tasks) in cals {
         let outcome = omacal_sync::caldav::sync_caldav_calendar(
@@ -234,6 +236,75 @@ pub(crate) async fn sync_account(
         total += outcome.upserted as u64;
     }
     Ok(total)
+}
+
+/// How stale the stored contacts may be before an account's address books
+/// are read again (#126). An hour: the suggestions are a convenience, the
+/// books are fetched whole, and a name added on the phone showing up within
+/// the hour is soon enough to be useful without making every five-minute
+/// sync carry an address book.
+const CONTACTS_MAX_AGE_MS: i64 = 60 * 60 * 1000;
+
+/// Refreshes one account's contacts, for the attendee field's suggestions.
+///
+/// **Never fails the sync.** The calendars are what this account exists for,
+/// and every path here — a server with no CardDAV, a REPORT it refuses, a
+/// book that errors — leaves the previous contacts alone and says so in the
+/// log. A partial read is not stored either: `replace_account_contacts`
+/// replaces the whole set, so half an address book would read as the user
+/// having deleted the other half.
+async fn sync_contacts(pool: &SqlitePool, account_id: i64, client: &CalDavClient) {
+    let last: Option<i64> =
+        sqlx::query_scalar("SELECT MAX(updated_at) FROM contacts WHERE account_id = ?1")
+            .bind(account_id)
+            .fetch_one(pool)
+            .await
+            .unwrap_or(None);
+    let now = crate::now_ms();
+    if last.is_some_and(|t| now - t < CONTACTS_MAX_AGE_MS) {
+        return;
+    }
+
+    let books = match client.discover_address_books().await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::debug!(%e, account_id, "no address books read; contacts left as they were");
+            return;
+        }
+    };
+    if books.is_empty() {
+        return;
+    }
+
+    let mut rows: Vec<omacal_store::StoredContact> = Vec::new();
+    for book in &books {
+        match client.cards(&book.url).await {
+            Ok(cards) => {
+                for card in cards {
+                    for contact in omacal_caldav::parse_cards(&card.ics) {
+                        for email in contact.emails {
+                            rows.push(omacal_store::StoredContact {
+                                href: card.url.clone(),
+                                uid: contact.uid.clone(),
+                                display_name: contact.name.clone(),
+                                email,
+                            });
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                // One unreadable book, and the stored set stays whole.
+                tracing::debug!(%e, book = %book.url, "address book not read; contacts unchanged");
+                return;
+            }
+        }
+    }
+
+    match omacal_store::replace_account_contacts(pool, account_id, &rows, now).await {
+        Ok(n) => tracing::debug!(account_id, contacts = n, books = books.len(), "contacts refreshed"),
+        Err(e) => tracing::warn!(%e, account_id, "contacts not stored"),
+    }
 }
 
 #[cfg(test)]

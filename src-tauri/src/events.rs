@@ -2854,6 +2854,78 @@ async fn truncate_series(
 mod tests {
     use super::*;
 
+    /// #126: the field offers everyone met with, then the address book.
+    ///
+    /// The order is the claim — a person on a real meeting outranks a name
+    /// in a contacts app — and so is the dedup: an address in both halves
+    /// appears once, as the history's entry, because that one knows how
+    /// often they have met.
+    #[tokio::test]
+    async fn guest_suggestions_put_people_met_before_the_address_book() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        let cal = seed_calendar_with_tz(&pool, "owner", "UTC").await;
+        let mut ev = all_day_row("2026-08-10", "2026-08-11", "UTC");
+        ev.calendar_id = cal;
+        ev.attendees = vec![
+            omacal_store::Attendee {
+                email: "ana@x.com".into(),
+                display_name: Some("Ana".into()),
+                response_status: "accepted".into(),
+                optional: false,
+                is_self: false,
+                comment: None,
+                additional_guests: 0,
+            },
+        ];
+        omacal_store::upsert_event(&pool, &ev).await.unwrap();
+        omacal_store::replace_account_contacts(
+            &pool,
+            1,
+            &[
+                // The same person the history knows, under a fuller name...
+                omacal_store::StoredContact {
+                    href: "a.vcf".into(), uid: None,
+                    display_name: Some("Ana Petrova".into()), email: "ana@x.com".into(),
+                },
+                // ...and one it does not: the point of the feature.
+                omacal_store::StoredContact {
+                    href: "b.vcf".into(), uid: None,
+                    display_name: Some("Boris".into()), email: "boris@x.com".into(),
+                },
+            ],
+            0,
+        )
+        .await
+        .unwrap();
+
+        let rows = guest_suggestions(&pool).await.unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.email.as_str()).collect::<Vec<_>>(),
+            vec!["ana@x.com", "boris@x.com"],
+            "met first, then the book"
+        );
+        assert_eq!(rows[0].met, 1, "the history's entry, which knows the count");
+        assert_eq!(rows[0].display_name.as_deref(), Some("Ana"));
+        assert_eq!(rows[1].met, 0, "nobody has met them yet, and that is the truth");
+    }
+
+    /// With no address books at all, the field is exactly what it was.
+    #[tokio::test]
+    async fn without_contacts_the_suggestions_are_the_meeting_history_alone() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        let cal = seed_calendar_with_tz(&pool, "owner", "UTC").await;
+        let mut ev = all_day_row("2026-08-10", "2026-08-11", "UTC");
+        ev.calendar_id = cal;
+        ev.attendees = vec![omacal_store::Attendee {
+            email: "ana@x.com".into(), display_name: None, response_status: "accepted".into(),
+            optional: false, is_self: false, comment: None, additional_guests: 0,
+        }];
+        omacal_store::upsert_event(&pool, &ev).await.unwrap();
+        let rows = guest_suggestions(&pool).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].email, "ana@x.com");
+    }
+
     /// Google's `organizer.self`, as a table: the account's own address, the
     /// calendar's own address (an event created on a calendar shared into
     /// this account is organized *as* the calendar), case-insensitively, and
@@ -9607,14 +9679,48 @@ pub(crate) struct KnownGuestRow {
     pub met: i64,
 }
 
+/// The people the field offers: **everyone met with first, then the address
+/// book** (#126).
+///
+/// The order is the answer to "who am I likely to be inviting": somebody on
+/// last week's meeting outranks a name in a contacts app, and the history
+/// half carries its own ranking already. Contacts fill in the rest — the
+/// colleague never met with, whose address nobody remembers — which is
+/// exactly what @xmha97 asked the CardDAV support for. An address in both
+/// halves appears once, as the history's entry, because that one knows how
+/// often they have met.
 #[tauri::command]
 pub(crate) async fn known_guests(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<Vec<KnownGuestRow>, String> {
-    Ok(omacal_store::known_guests(&state.pool)
+    guest_suggestions(&state.pool).await
+}
+
+/// [`known_guests`] against a pool, so a test can seed one and ask.
+pub(crate) async fn guest_suggestions(
+    pool: &sqlx::SqlitePool,
+) -> Result<Vec<KnownGuestRow>, String> {
+    let met = omacal_store::known_guests(pool)
         .await
-        .map_err(|e| crate::errors::user_facing(&e))?
+        .map_err(|e| crate::errors::user_facing(&e))?;
+    let mut seen: std::collections::HashSet<String> = met.iter().map(|g| g.email.clone()).collect();
+    let mut out: Vec<KnownGuestRow> = met
         .into_iter()
         .map(|g| KnownGuestRow { email: g.email, display_name: g.display_name, met: g.met })
-        .collect())
+        .collect();
+    // A contacts read that fails is no reason to lose the history half: the
+    // field still works, with fewer names in it.
+    match omacal_store::known_contacts(pool).await {
+        Ok(contacts) => {
+            for c in contacts {
+                if seen.insert(c.email.clone()) {
+                    // `met: 0` is the truth — no meeting carries them — and
+                    // it is what sorts them below everyone who does.
+                    out.push(KnownGuestRow { email: c.email, display_name: c.display_name, met: 0 });
+                }
+            }
+        }
+        Err(e) => tracing::warn!(%e, "contacts left out of the guest suggestions"),
+    }
+    Ok(out)
 }

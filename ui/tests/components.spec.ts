@@ -4249,7 +4249,7 @@ test.describe('EventForm', () => {
     // timezone picker's rule. Clicking a row adds the guest whole.
     await open(page, 'create');
     await page.getByLabel('Add guest').fill('isk');
-    const list = page.getByRole('listbox', { name: 'People you have met with' });
+    const list = page.getByRole('listbox', { name: 'People and contacts' });
     await expect(list).toBeVisible();
     await list.getByRole('option', { name: /Iskren Hadzhinedev/ }).click();
     await expect(page.locator('.guests')).toContainText('iskren.h@x3me.net');
@@ -4265,7 +4265,7 @@ test.describe('EventForm', () => {
     await open(page, 'create');
     const input = page.getByLabel('Add guest');
     await input.fill('x3me');
-    const list = page.getByRole('listbox', { name: 'People you have met with' });
+    const list = page.getByRole('listbox', { name: 'People and contacts' });
     await expect(list).toBeVisible();
 
     // Escape with the list open is the list's alone — the form survives.
@@ -4294,7 +4294,7 @@ test.describe('EventForm', () => {
     await open(page, 'create');
     const input = page.getByLabel('Add guest');
     await input.fill('iskren');
-    await expect(page.getByRole('listbox', { name: 'People you have met with' }))
+    await expect(page.getByRole('listbox', { name: 'People and contacts' }))
       .toHaveCount(1);
 
     await input.press('Enter');
@@ -4331,7 +4331,7 @@ test.describe('EventForm', () => {
     await open(page, 'create');
     const input = page.getByLabel('Add guest');
     await input.fill('eva.m@x3me.ne');
-    await expect(page.getByRole('listbox', { name: 'People you have met with' }))
+    await expect(page.getByRole('listbox', { name: 'People and contacts' }))
       .toHaveCount(1);
     await input.press('Enter');
     // Not `eva.m@x3me.net`: what was typed is itself an address.

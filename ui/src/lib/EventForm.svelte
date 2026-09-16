@@ -1174,7 +1174,7 @@
           <!-- The same shape as Settings' timezone list, for the same job:
                what is typed, completed from what is known — here, the
                people this calendar has already met. -->
-          <div class="gsuggest" role="listbox" aria-label="People you have met with">
+          <div class="gsuggest" role="listbox" aria-label="People and contacts">
             {#each guestMatches as p, i (p.email)}
               <button type="button" role="option" aria-selected={i === hi}
                       class:hi={i === hi} onclick={() => pickGuest(p)}>

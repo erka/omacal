@@ -4,6 +4,7 @@ use std::str::FromStr;
 
 pub mod calendars;
 pub mod changes;
+pub mod contacts;
 pub mod declines;
 pub mod events;
 pub mod invites;
@@ -16,6 +17,7 @@ pub use calendars::{
 pub use changes::{
     changed_meetings, dismiss_all_changes, dismiss_change, forget_changes, ChangedMeeting,
 };
+pub use contacts::{known_contacts, replace_account_contacts, KnownContact, StoredContact};
 pub use declines::{declined_guests, dismiss_all_declines, dismiss_decline, DeclinedGuest};
 pub use invites::{
     mark_invites_seeded, pending_invites, record_invite_notice, unanswered_invites,

@@ -65,6 +65,19 @@ pub struct Resource {
     pub ics: String,
 }
 
+/// An address book the account can read (#126).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoveredAddressBook {
+    /// Absolute URL of the collection.
+    pub url: String,
+    pub display_name: Option<String>,
+}
+
+struct AddressBookEntry {
+    href: String,
+    display_name: Option<String>,
+}
+
 pub struct CalDavClient {
     http: reqwest::Client,
     base: Url,
@@ -145,6 +158,10 @@ fn same_site(original: &Url, candidate: &Url) -> bool {
 }
 
 const NS: &str = r#"xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/" xmlns:ic="http://apple.com/ns/ical/""#;
+/// CardDAV's own namespace, alongside DAV's. Separate from [`NS`] because
+/// only the address-book half speaks it, and a server that does not do
+/// CardDAV at all should see no mention of it in a calendar request.
+const CARD_NS: &str = r#"xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav""#;
 
 impl CalDavClient {
     pub fn new(base_url: &str, username: &str, password: &str) -> anyhow::Result<Self> {
@@ -290,6 +307,89 @@ impl CalDavClient {
                 read_only: entry.read_only,
                 timezone: entry.timezone,
             });
+        }
+        Ok(out)
+    }
+
+    /// The address books this account can read (#126, RFC 6352).
+    ///
+    /// The same walk as [`Self::discover`] with one property changed:
+    /// `addressbook-home-set` instead of the calendar's. A server with no
+    /// CardDAV at all answers without the property, which is an empty list
+    /// here rather than an error — plenty of CalDAV servers have no address
+    /// books, and that is not a fault to report to anybody.
+    pub async fn discover_address_books(&self) -> Result<Vec<DiscoveredAddressBook>, CalDavError> {
+        let body = format!(
+            r#"<?xml version="1.0"?><d:propfind {CARD_NS}><d:prop><d:current-user-principal/></d:prop></d:propfind>"#
+        );
+        let text = match self.propfind(&self.base, "0", body.clone()).await {
+            Ok(t) => t,
+            Err(CalDavError::Http(_)) => {
+                let wk = self.base.join("/.well-known/carddav").map_err(anyhow::Error::from)?;
+                self.propfind(&wk, "0", body).await?
+            }
+            Err(e) => return Err(e),
+        };
+        let Some(principal_href) = first_href_prop(&text, "current-user-principal") else {
+            return Ok(Vec::new());
+        };
+        let principal = self.resolve(&self.base, &principal_href)?;
+
+        let body = format!(
+            r#"<?xml version="1.0"?><d:propfind {CARD_NS}><d:prop><card:addressbook-home-set/></d:prop></d:propfind>"#
+        );
+        let text = self.propfind(&principal, "0", body).await?;
+        let Some(home_href) = first_href_prop(&text, "addressbook-home-set") else {
+            return Ok(Vec::new());
+        };
+        let home = self.resolve(&principal, &home_href)?;
+
+        let body = format!(
+            r#"<?xml version="1.0"?><d:propfind {CARD_NS}><d:prop>
+                 <d:resourcetype/><d:displayname/>
+               </d:prop></d:propfind>"#
+        );
+        let text = self.propfind(&home, "1", body).await?;
+        let mut out = Vec::new();
+        for entry in parse_address_books(&text) {
+            match self.resolve(&home, &entry.href) {
+                Ok(url) => out.push(DiscoveredAddressBook {
+                    url: url.to_string(),
+                    display_name: entry.display_name,
+                }),
+                Err(e) => tracing::warn!(%e, "skipping an address book with an unusable href"),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Every card in an address book, as `(href, vCard)` pairs.
+    ///
+    /// `addressbook-query` with no filter is "all of them", which is what a
+    /// suggestion list wants; the cards themselves come back in the same
+    /// answer, so there is no second round trip per contact. A server that
+    /// refuses the REPORT (some allow only PROPFIND) leaves an empty list
+    /// rather than a failure: contacts are a convenience, and the calendar
+    /// this account exists for must sync either way.
+    pub async fn cards(&self, address_book_url: &str) -> Result<Vec<Resource>, CalDavError> {
+        let url = Url::parse(address_book_url).map_err(anyhow::Error::from)?;
+        let body = format!(
+            r#"<?xml version="1.0"?><card:addressbook-query {CARD_NS}>
+                 <d:prop><d:getetag/><card:address-data/></d:prop>
+               </card:addressbook-query>"#
+        );
+        let (status, text, _) = self
+            .request("REPORT", &url, Some("1"), "application/xml; charset=utf-8", body, &[])
+            .await?;
+        if !status.is_success() {
+            return Err(CalDavError::Http(status));
+        }
+        let mut out = Vec::new();
+        for r in parse_cards_multistatus(&text) {
+            match self.resolve(&url, &r.href) {
+                Ok(abs) => out.push(Resource { url: abs.to_string(), etag: r.etag, ics: r.ics }),
+                Err(e) => tracing::warn!(%e, "skipping a card with an unusable href"),
+            }
         }
         Ok(out)
     }
@@ -557,6 +657,70 @@ struct RawResource {
     ics: String,
 }
 
+/// An address book from the home set: a collection whose `resourcetype`
+/// carries CardDAV's `addressbook`.
+fn parse_address_books(xml: &str) -> Vec<AddressBookEntry> {
+    let Ok(doc) = roxmltree::Document::parse(xml) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for resp in doc.descendants().filter(|n| n.is_element() && local(n.tag_name()) == "response") {
+        let href = resp
+            .children()
+            .find(|n| n.is_element() && local(n.tag_name()) == "href")
+            .and_then(|n| n.text())
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string();
+        let mut is_book = false;
+        let mut display_name = None;
+        for node in resp.descendants().filter(|n| n.is_element()) {
+            match local(node.tag_name()).as_str() {
+                "addressbook" => is_book = true,
+                "displayname" => {
+                    display_name = node.text().map(str::trim).filter(|t| !t.is_empty()).map(str::to_string);
+                }
+                _ => {}
+            }
+        }
+        if is_book && !href.is_empty() {
+            out.push(AddressBookEntry { href, display_name });
+        }
+    }
+    out
+}
+
+/// [`parse_resources`] for cards: the payload element is `address-data`
+/// rather than `calendar-data`, and everything else is the same multistatus.
+fn parse_cards_multistatus(xml: &str) -> Vec<RawResource> {
+    let Ok(doc) = roxmltree::Document::parse(xml) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for resp in doc.descendants().filter(|n| n.is_element() && local(n.tag_name()) == "response") {
+        let href = resp
+            .children()
+            .find(|n| n.is_element() && local(n.tag_name()) == "href")
+            .and_then(|n| n.text())
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string();
+        let mut etag = None;
+        let mut card = String::new();
+        for node in resp.descendants().filter(|n| n.is_element()) {
+            match local(node.tag_name()).as_str() {
+                "getetag" => etag = node.text().map(str::trim).filter(|t| !t.is_empty()).map(str::to_string),
+                "address-data" => card = node.text().unwrap_or("").to_string(),
+                _ => {}
+            }
+        }
+        if !href.is_empty() && !card.trim().is_empty() {
+            out.push(RawResource { href, etag, ics: card });
+        }
+    }
+    out
+}
+
 fn parse_resources(xml: &str) -> Vec<RawResource> {
     let Ok(doc) = roxmltree::Document::parse(xml) else {
         return Vec::new();
@@ -720,6 +884,95 @@ mod tests {
         let chores = &cals[1];
         assert!(chores.supports_tasks && !chores.supports_events);
         assert!(chores.read_only, "a read privilege alone means read-only");
+    }
+
+    /// The CardDAV walk (#126), which is the calendar's with one property
+    /// changed. The home holds the collection itself and one address book;
+    /// only the book comes back.
+    #[tokio::test]
+    async fn address_book_discovery_walks_principal_home_and_books() {
+        const CARD_HOME: &str = r#"<?xml version="1.0"?>
+          <d:multistatus xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
+          <d:response><d:href>/principals/p/</d:href><d:propstat><d:prop>
+            <card:addressbook-home-set><d:href>/cards/p/</d:href></card:addressbook-home-set>
+          </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#;
+        const BOOKS: &str = r#"<?xml version="1.0"?>
+          <d:multistatus xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
+          <d:response><d:href>/cards/p/</d:href><d:propstat><d:prop>
+            <d:resourcetype><d:collection/></d:resourcetype><d:displayname>home</d:displayname>
+          </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
+          <d:response><d:href>/cards/p/contacts/</d:href><d:propstat><d:prop>
+            <d:resourcetype><d:collection/><card:addressbook/></d:resourcetype>
+            <d:displayname>Contacts</d:displayname>
+          </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
+          </d:multistatus>"#;
+        let server = MockServer::start().await;
+        Mock::given(method("PROPFIND")).and(path("/"))
+            .respond_with(ResponseTemplate::new(207).set_body_raw(PRINCIPAL, "application/xml"))
+            .mount(&server).await;
+        Mock::given(method("PROPFIND")).and(path("/principals/p/"))
+            .respond_with(ResponseTemplate::new(207).set_body_raw(CARD_HOME, "application/xml"))
+            .mount(&server).await;
+        Mock::given(method("PROPFIND")).and(path("/cards/p/"))
+            .respond_with(ResponseTemplate::new(207).set_body_raw(BOOKS, "application/xml"))
+            .mount(&server).await;
+
+        let client = CalDavClient::new(&server.uri(), "user", "pass").unwrap();
+        let books = client.discover_address_books().await.unwrap();
+        assert_eq!(books.len(), 1, "the home collection itself is not an address book");
+        assert_eq!(books[0].display_name.as_deref(), Some("Contacts"));
+        assert!(books[0].url.ends_with("/cards/p/contacts/"));
+    }
+
+    /// **A server with no CardDAV is not a failure.** Plenty of CalDAV
+    /// servers have no address books, and the calendar this account exists
+    /// for must sync regardless.
+    #[tokio::test]
+    async fn a_server_without_address_books_answers_with_none() {
+        const NO_HOME: &str = r#"<?xml version="1.0"?>
+          <d:multistatus xmlns:d="DAV:"><d:response><d:href>/principals/p/</d:href>
+          <d:propstat><d:prop/><d:status>HTTP/1.1 404 Not Found</d:status></d:propstat>
+          </d:response></d:multistatus>"#;
+        let server = MockServer::start().await;
+        Mock::given(method("PROPFIND")).and(path("/"))
+            .respond_with(ResponseTemplate::new(207).set_body_raw(PRINCIPAL, "application/xml"))
+            .mount(&server).await;
+        Mock::given(method("PROPFIND")).and(path("/principals/p/"))
+            .respond_with(ResponseTemplate::new(207).set_body_raw(NO_HOME, "application/xml"))
+            .mount(&server).await;
+        let client = CalDavClient::new(&server.uri(), "user", "pass").unwrap();
+        assert_eq!(client.discover_address_books().await.unwrap(), Vec::new());
+    }
+
+    /// The cards themselves ride the same answer as their etags, so a book
+    /// of 300 contacts is one round trip and not 301.
+    #[tokio::test]
+    async fn an_address_book_query_returns_the_cards_themselves() {
+        let body = r#"<?xml version="1.0"?>
+          <d:multistatus xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
+          <d:response><d:href>/cards/p/contacts/ana.vcf</d:href><d:propstat><d:prop>
+            <d:getetag>"v1"</d:getetag>
+            <card:address-data>BEGIN:VCARD
+VERSION:3.0
+FN:Ana Petrova
+EMAIL:ana@x.com
+END:VCARD
+</card:address-data>
+          </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
+          <d:response><d:href>/cards/p/contacts/empty.vcf</d:href><d:propstat><d:prop>
+            <d:getetag>"v2"</d:getetag>
+          </d:prop><d:status>HTTP/1.1 404 Not Found</d:status></d:propstat></d:response>
+          </d:multistatus>"#;
+        let server = MockServer::start().await;
+        Mock::given(method("REPORT")).and(path("/cards/p/contacts/"))
+            .respond_with(ResponseTemplate::new(207).set_body_raw(body, "application/xml"))
+            .mount(&server).await;
+        let client = CalDavClient::new(&server.uri(), "user", "pass").unwrap();
+        let cards = client.cards(&format!("{}/cards/p/contacts/", server.uri())).await.unwrap();
+        assert_eq!(cards.len(), 1, "a response carrying no card is not one");
+        assert_eq!(cards[0].etag.as_deref(), Some("\"v1\""));
+        assert!(cards[0].ics.contains("FN:Ana Petrova"));
+        assert_eq!(crate::vcard::parse_cards(&cards[0].ics)[0].emails, vec!["ana@x.com".to_string()]);
     }
 
     #[tokio::test]
