@@ -2345,6 +2345,63 @@ test.describe('CalendarPopover', () => {
 test.describe('EventPopover', () => {
   const show = (f: string) => `/tests/harness/index.html?c=EventPopover&f=${f}`;
 
+  for (const [fixture, url] of [
+    ['readonly-conference', 'https://teams.microsoft.com/l/meetup-join/test?context=sample'],
+    ['location-holds-a-real-zoom-link', 'https://us02web.zoom.us/j/123456?pwd=x'],
+    ['description-holds-an-html-zoom-link', 'https://us02web.zoom.us/j/123456?pwd=x'],
+    ['location-and-description-both-hold-a-meeting-link', 'https://meet.google.com/abc-defg-hij'],
+  ]) {
+    test(`copy meeting link from event details: ${fixture}`, async ({ page }) => {
+      await page.goto(show(fixture));
+      await page.evaluate(() => {
+        Object.defineProperty(navigator, 'clipboard', {
+          configurable: true,
+          value: { writeText: async (value: string) => { (window as any).__fieldCopy = value; } },
+        });
+      });
+      const copy = page.getByRole('button', { name: 'Copy meeting link' });
+      await copy.click();
+      await expect.poll(() => page.evaluate(() => (window as any).__fieldCopy)).toBe(url);
+      await expect(page.locator('.pop .note')).toHaveText('Copied meeting link');
+      await expect(page.getByRole('link', { name: 'Join video call' })).toHaveAttribute('href', url);
+
+      // Enter on this button must copy, not trigger the popover's Join shortcut.
+      await page.evaluate(() => { (window as any).__fieldCopy = null; });
+      await copy.focus();
+      await page.keyboard.press('Enter');
+      await expect.poll(() => page.evaluate(() => (window as any).__fieldCopy)).toBe(url);
+      expect(await page.evaluate(() => (window as any).__lastEdit)).toBeNull();
+      expect(await page.evaluate(() => (window as any).__lastCopy)).toBeNull();
+      const calls = await page.evaluate(() => (window as any).__harness.calls);
+      expect(calls.filter((c: any) => c.cmd === 'open_conference')).toHaveLength(0);
+    });
+  }
+
+  test('copy meeting link reports clipboard failure and lets the user retry', async ({ page }) => {
+    await page.goto(show('readonly-conference'));
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: async () => { throw new Error('denied'); } },
+      });
+    });
+    await page.getByRole('button', { name: 'Copy meeting link' }).click();
+    await expect(page.locator('.pop .note.err')).toHaveText('Could not copy meeting link. Try again.');
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true, value: { writeText: async () => {} },
+      });
+    });
+    await page.getByRole('button', { name: 'Copy meeting link' }).click();
+    await expect(page.locator('.pop .note')).toHaveText('Copied meeting link');
+  });
+
+  test('copy meeting link is absent when there is no video call', async ({ page }) => {
+    await page.goto(show('standup'));
+    await expect(page.locator('.pop')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Copy meeting link' })).toHaveCount(0);
+  });
+
   test('the panel never scrolls sideways, whatever a field holds', async ({ page }) => {
     // Reported from Plamen's calendar: a full-width horizontal scrollbar along
     // the bottom of the popover. It came from an organizer address —

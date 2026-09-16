@@ -381,9 +381,13 @@
     return [detail.title ?? '(no title)', whenLine, detail.location ?? ''].filter(Boolean).join('\n');
   };
 
-  function copyField(value: string, label: string) {
-    try { navigator.clipboard?.writeText(value).catch(() => {}); } catch { /* no clipboard here */ }
-    note = { text: `Copied ${label}`, kind: 'info' };
+  async function copyField(value: string, label: string) {
+    try {
+      await navigator.clipboard.writeText(value);
+      note = { text: `Copied ${label}`, kind: 'info' };
+    } catch {
+      note = { text: `Could not copy ${label}. Try again.`, kind: 'error' };
+    }
   }
 
   // Ctrl+C — ⌘C on a Mac — copies the focused field when it has one, otherwise
@@ -530,9 +534,14 @@
          spawn hands the browser this process's AppImage environment and
          crashes it (issue #1, `browser::open_external`). The backend
          re-derives the URL from its store rather than trusting this one. -->
-    <a class="conf" href={joinUrl} target="_blank" rel="noopener noreferrer"
-       data-copy-label="meeting link" data-copy-value={joinUrl}
-       onclick={(e) => { e.preventDefault(); void openConference(detail.id); }}>Join video call</a>
+    <div class="conference-actions">
+      <a class="conf" href={joinUrl} target="_blank" rel="noopener noreferrer"
+         data-copy-label="meeting link" data-copy-value={joinUrl}
+         onclick={(e) => { e.preventDefault(); void openConference(detail.id); }}>Join video call</a>
+      <button type="button" class="copy-conference" aria-label="Copy meeting link"
+              data-copy-label="meeting link" data-copy-value={joinUrl}
+              onclick={() => copyField(joinUrl!, 'meeting link')}>Copy link</button>
+    </div>
   {/if}
   <!-- Suppressed for the addresses Google mints for shared calendars and
        meeting rooms: "Organized by" followed by forty hex characters is worse
@@ -699,9 +708,12 @@
   .desc a { color: var(--accent); }
 
   .loc, .organizer { color: var(--muted); font-size: 11px; margin: 0 0 4px; }
+  .conference-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+                        margin: 0 0 8px; }
   .conf { display: inline-block; color: var(--accent); font-size: 11px;
-          text-decoration: none; margin: 0 0 8px; }
+          text-decoration: none; }
   .conf:hover { text-decoration: underline; }
+  .copy-conference { font: inherit; font-size: 10.5px; cursor: copy; padding: 2px 6px; }
 
   /* Sits with the guest list rather than with the detail lines above it,
      because it is a reading of that list and not another fact about the

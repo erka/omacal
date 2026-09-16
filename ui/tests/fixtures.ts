@@ -2663,6 +2663,15 @@ export const FIXTURES: Record<string, Record<string, any>> = {
     },
   },
   EventPopover: {
+    'readonly-conference': {
+      detail: detail({
+        id: 70, title: 'Project catch-up', can_edit: false,
+        conference_uri: 'https://teams.microsoft.com/l/meetup-join/test?context=sample',
+        location: 'https://us06web.zoom.us/j/123456?pwd=other',
+      }),
+      anchor: ANCHOR, occurrenceStartMs: MON + 9 * H, occurrenceEndMs: MON + 10 * H,
+      onclose: noop, onresponded: noop, onedit: noop, ondelete: noop,
+    },
     standup: {
       detail: detail({
         id: 1,
