@@ -2405,6 +2405,30 @@ test.describe('App', () => {
     expect(mins(after.start)).toBeGreaterThan(mins(before.start));
   });
 
+  /** #131: the draft's edges resize it, and now say so. `EventBlock`'s grips
+   *  (#77) do this for saved events; the draft had the cursor on a
+   *  pseudo-element, which is not what the pointer lands on, so the hand
+   *  stayed `grab` over an edge that would resize. */
+  test('the draft’s edges show the resize cursor, and its middle the move cursor', async ({ page }) => {
+    await writable(page);
+    await page.keyboard.press('n');
+    await expect(newForm(page)).toBeVisible();
+    const ghost = page.locator('[data-testid="form-preview"]').first();
+    await expect(ghost).toBeVisible();
+    const box = (await ghost.boundingBox())!;
+    const at = (dy: number) => page.evaluate(({ px, py }) => {
+      const el = document.elementFromPoint(px, py) as HTMLElement | null;
+      return el ? getComputedStyle(el).cursor : null;
+    }, { px: box.x + box.width / 2, py: box.y + dy });
+
+    expect(await at(2)).toBe('ns-resize');
+    expect(await at(Math.round(box.height) - 2)).toBe('ns-resize');
+    expect(await at(Math.round(box.height / 2))).toBe('grab');
+    // And the grips are the whole of it: nothing else in the ghost claims a
+    // resize cursor, so a press in the middle is still a move.
+    expect(await ghost.locator('.grip').count()).toBe(2);
+  });
+
   test('dragging the draft’s bottom edge extends it without moving its start', async ({ page }) => {
     // The other half of the gesture, and the one a move-only implementation
     // would silently fail: `edgeAt` decides which this is from where inside

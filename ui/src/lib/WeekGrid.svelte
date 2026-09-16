@@ -24,7 +24,7 @@
   import EventPopover from './EventPopover.svelte';
   import { getEventDetail, refreshEvent, type EventDetail, type Occurrence } from './eventdetail';
   import {
-    SNAP_MS, beganDrag, colsMoved, edgeAt, spanForMove, spanForResize, sweepAsk,
+    RESIZE_EDGE_PX, SNAP_MS, beganDrag, colsMoved, edgeAt, spanForMove, spanForResize, sweepAsk,
   } from './drag';
   import { cursorNamesEvent, type KeyboardCursor } from './keyboardnav';
   import { dateOf } from './eventform';
@@ -178,6 +178,19 @@
     const start = hourFrac(day, visibleHours().start), end = hourFrac(day, visibleHours().end);
     return end > start ? { start, span: end - start } : { start: 0, span: 1 };
   }
+  /** Whether the draft's ghost in `day` is tall enough to carry resize
+   *  grips — `edgeAt`'s own rule, in the ghost's own pixels. Below it a
+   *  press anywhere on the ghost moves it, so a resize cursor there would
+   *  promise a gesture `startDraftDrag` refuses. */
+  function ghostHasGrips(day: { start_ms: number; end_ms: number }): boolean {
+    if (formPreview?.kind !== 'timed') return false;
+    const s = Math.max(formPreview.startMs, day.start_ms);
+    const e = Math.min(formPreview.endMs, day.end_ms);
+    if (e <= s) return false;
+    const columnHeight = visibleHeight / crop(day).span;
+    return ((e - s) / (day.end_ms - day.start_ms)) * columnHeight >= RESIZE_EDGE_PX * 3;
+  }
+
   function columnStyle(day: { start_ms: number; end_ms: number }) {
     const range = crop(day), height = visibleHeight / range.span;
     return `height:${height}px;min-height:0;top:${-range.start * height}px`;
@@ -1823,7 +1836,17 @@
           aria-hidden={grabbable ? undefined : 'true'}
           aria-label={grabbable ? 'Draft event — drag to move, drag an edge to resize' : undefined}
           onpointerdown={grabbable ? (e) => startDraftDrag(e, day) : undefined}
-        ></button>
+        >
+          <!-- The resize cursor's home, and nothing else's — `EventBlock`'s
+               own grips (#77), for #131: the draft's edges are resizable and
+               said so nowhere, because a pseudo-element's `cursor` is not
+               what the pointer lands on. Real elements are, and a spec can
+               ask `elementFromPoint` what is under the edge. -->
+          {#if grabbable && ghostHasGrips(day)}
+            <span class="grip" style="top:0; height:{RESIZE_EDGE_PX}px" aria-hidden="true"></span>
+            <span class="grip" style="bottom:0; height:{RESIZE_EDGE_PX}px" aria-hidden="true"></span>
+          {/if}
+        </button>
       {/if}
 
       {#each day.placed as p}
@@ -2171,11 +2194,7 @@
      numbers compare directly. */
   .formghost.grabbable { pointer-events: auto; cursor: grab; touch-action: none;
                          z-index: 41; }
-  .formghost.grabbable::before,
-  .formghost.grabbable::after { content: ''; position: absolute; left: 0; right: 0;
-                                height: 6px; cursor: ns-resize; }
-  .formghost.grabbable::before { top: -1.5px; }
-  .formghost.grabbable::after { bottom: -1.5px; }
+  .formghost .grip { position: absolute; left: 0; right: 0; cursor: ns-resize; }
 
   /* The loudest thing on screen, deliberately. */
   .now { position: absolute; left: 0; right: 0; border-top: 1.5px solid var(--now); z-index: 5;

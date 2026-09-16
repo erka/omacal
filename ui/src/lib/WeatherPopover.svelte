@@ -66,6 +66,7 @@
   tabindex="-1"
   aria-label="Weather for {dayLabel}"
   style="top:{pos.top}px; left:{pos.left}px"
+  oncontextmenu={(e) => e.preventDefault()}
 >
   <div class="hero">
     <WeatherGlyph bucket={now ? now.bucket : day.bucket} size={34} />

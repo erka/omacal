@@ -5963,6 +5963,21 @@ test.describe('Weather card', () => {
   const card = (page: import('@playwright/test').Page, name: string) =>
     page.getByRole('dialog', { name: `Weather for ${name}` });
 
+  /** #129: right-clicking the card showed the engine's own menu — Reload,
+   *  Inspect — over a calendar. The grid, the month cells and the blocks
+   *  already refuse it; the card did not. */
+  test('a right-click on the card does not open the browser menu', async ({ page }) => {
+    await page.goto(show('WeatherPopover', 'today'));
+    const c = card(page, 'Monday, September 7');
+    await expect(c).toBeVisible();
+    const prevented = await c.evaluate((el) => {
+      const e = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+      el.dispatchEvent(e);
+      return e.defaultPrevented;
+    });
+    expect(prevented).toBe(true);
+  });
+
   test('today leads with now, and names the place and where it came from', async ({ page }) => {
     await page.goto(show('WeatherPopover', 'today'));
     const c = card(page, 'Monday, September 7');
