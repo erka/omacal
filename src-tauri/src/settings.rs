@@ -16,6 +16,7 @@ const NOTIFICATIONS_KEY: &str = "notifications_enabled";
 const LIST_MODE_KEY: &str = "list_mode";
 const SHOW_DATE_KEY: &str = "show_date";
 const HOUR_HEIGHT_KEY: &str = "hour_height";
+const TASKS_WIDTH_KEY: &str = "tasks_width";
 /// Pixels per hour in Day and Week when nobody has zoomed: the grid's own
 /// 70 (see `WeekGrid.svelte`'s `.col`), and what an unusable stored value
 /// falls back to.
@@ -24,6 +25,14 @@ pub const HOUR_HEIGHT_DEFAULT: i64 = 70;
 /// hour labels still a line apart; 160 is six hours to a tall pane. Mirrored
 /// in `ui/src/lib/zoom.ts`, which clamps the gesture before it ever asks —
 /// this pair is the floor and ceiling the row is held to regardless.
+/// The tasks sidebar's width in pixels, and the bounds a drag is held to
+/// (#130). 288 is what the panel shipped as. The floor is a task's own line
+/// — a checkbox, a title worth reading and the date chip — and the ceiling
+/// keeps the calendar the larger half on a laptop pane.
+pub const TASKS_WIDTH_DEFAULT: i64 = 288;
+pub const TASKS_WIDTH_MIN: i64 = 220;
+pub const TASKS_WIDTH_MAX: i64 = 560;
+
 pub const HOUR_HEIGHT_MIN: i64 = 48;
 pub const HOUR_HEIGHT_MAX: i64 = 160;
 const FALLBACK_KEY: &str = "fallback_reminder_minutes";
@@ -485,6 +494,12 @@ pub struct AppSettings {
     /// write; a stored value outside it, or not a number, reads as
     /// [`HOUR_HEIGHT_DEFAULT`].
     pub hour_height: i64,
+    /// How wide the tasks sidebar is (#130), for `hour_height`'s reason: a
+    /// width dragged once should not be dragged again every morning, and the
+    /// edge is the control, so no tab in the modal shows it. Held to
+    /// [`TASKS_WIDTH_MIN`]..=[`TASKS_WIDTH_MAX`] on write; a stored value
+    /// outside it, or not a number, reads as [`TASKS_WIDTH_DEFAULT`].
+    pub tasks_width: i64,
     /// Minutes-before for the fallback reminders (fallback spec §3): what
     /// fires for a timed event that follows its calendar's defaults when the
     /// calendar has none. Minutes alone, because the fallback is popup by
@@ -780,6 +795,12 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
             .and_then(|v| v.parse::<i64>().ok())
             .map(|px| px.clamp(HOUR_HEIGHT_MIN, HOUR_HEIGHT_MAX))
             .unwrap_or(HOUR_HEIGHT_DEFAULT),
+        // Same rule, same reasons, for the sidebar's width (#130).
+        tasks_width: read(pool, TASKS_WIDTH_KEY)
+            .await
+            .and_then(|v| v.parse::<i64>().ok())
+            .map(|px| px.clamp(TASKS_WIDTH_MIN, TASKS_WIDTH_MAX))
+            .unwrap_or(TASKS_WIDTH_DEFAULT),
         // **Shipped as 60 and 10, not empty** (fallback spec §3): the gap
         // this fills is real meetings going silent on receive-only shared
         // calendars, and an empty default would leave a fresh install with
@@ -1666,6 +1687,21 @@ pub async fn set_hour_height(
 ) -> Result<AppSettings, String> {
     let px = px.clamp(HOUR_HEIGHT_MIN, HOUR_HEIGHT_MAX);
     write(&state.pool, HOUR_HEIGHT_KEY, &px.to_string())
+        .await
+        .map_err(|e| crate::errors::user_facing(&e))?;
+    Ok(read_settings(&state.pool).await)
+}
+
+/// Stores the tasks sidebar's width, clamped for [`set_hour_height`]'s
+/// reason: the value comes off a drag, and the honest answer to "a little
+/// past the end" is the end.
+#[tauri::command]
+pub async fn set_tasks_width(
+    state: tauri::State<'_, AppState>,
+    px: i64,
+) -> Result<AppSettings, String> {
+    let px = px.clamp(TASKS_WIDTH_MIN, TASKS_WIDTH_MAX);
+    write(&state.pool, TASKS_WIDTH_KEY, &px.to_string())
         .await
         .map_err(|e| crate::errors::user_facing(&e))?;
     Ok(read_settings(&state.pool).await)

@@ -41,8 +41,9 @@
     dayCursor, eventAtCursor, moveDay, moveEvent, type KeyboardCursor,
   } from './lib/keyboardnav';
   import {
-    getSettings, setHourHeight, setLastView, setListMode, type AppSettings, type WeekViewDays,
+    getSettings, setHourHeight, setLastView, setListMode, setTasksWidth, type AppSettings, type WeekViewDays,
   } from './lib/settings';
+  import { TASKS_WIDTH_DEFAULT } from './lib/taskwidth';
   import { HOUR_PX_DEFAULT, hourPxStepped } from './lib/zoom';
   import { padFor, sliceWeek, visibleIndex, windowHeld } from './lib/weekwindow';
   import { setClockFormat } from './lib/clock.svelte';
@@ -476,6 +477,26 @@
    *  each would be a row write. */
   let hourPx = $state(HOUR_PX_DEFAULT);
   let persistedHourPx = HOUR_PX_DEFAULT;
+  /** The tasks sidebar's width (#130), stored for `hourPx`'s reason and on
+   *  the same terms: the edge is the control, the drag is dozens of updates,
+   *  and only where it came to rest is worth a row. */
+  let tasksWidth = $state(TASKS_WIDTH_DEFAULT);
+  let persistedTasksWidth = TASKS_WIDTH_DEFAULT;
+  let tasksWidthTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => {
+    const px = tasksWidth;
+    if (px === persistedTasksWidth) return;
+    clearTimeout(tasksWidthTimer);
+    tasksWidthTimer = setTimeout(() => {
+      persistedTasksWidth = px;
+      setTasksWidth(px).catch((err) => {
+        // The panel keeps the width on screen either way; only the next
+        // launch is affected.
+        error = `Tasks width not saved · ${String(err)}`;
+      });
+    }, 400);
+    return () => clearTimeout(tasksWidthTimer);
+  });
   let hourPxTimer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
     const px = hourPx;
@@ -810,6 +831,12 @@
         // Only if nobody has zoomed in the meantime: a pinch made while the
         // read was in flight is the newer fact, and it is about to be stored.
         if (hourPx === persistedHourPx) { hourPx = s.hourHeight; persistedHourPx = s.hourHeight; }
+        // Same rule for the sidebar: a width dragged while the read was in
+        // flight is the newer fact, and it is about to be stored.
+        if (tasksWidth === persistedTasksWidth) {
+          tasksWidth = s.tasksWidth;
+          persistedTasksWidth = s.tasksWidth;
+        }
         if (listModeChoices !== before) return; // superseded by the user's own choice
         listMode = s.listMode;
       })
@@ -2092,7 +2119,9 @@
   <div class="workspace">
     {#if tasksOpen}
       <TasksSidebar onclose={() => (tasksOpen = false)}
-                    onchange={() => { void refreshTasks(); }} />
+                    onchange={() => { void refreshTasks(); }}
+                    width={tasksWidth}
+                    onresize={(px) => (tasksWidth = px)} />
     {/if}
     <div class="view">
     {#if view === 'month'}

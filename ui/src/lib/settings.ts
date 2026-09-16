@@ -103,6 +103,11 @@ export type AppSettings = {
    *  left the grid at. Stored for `listMode`'s reason and, like it, shown by
    *  no tab: the gesture is the control. `zoom.ts` owns the range. */
   hourHeight: number;
+  /** How wide the tasks sidebar is, in pixels (#130). Dragged by its edge
+   *  and kept, for `hourHeight`'s reason: a size set once should not be set
+   *  again every morning. Clamped by the backend to a readable minimum and
+   *  a width that keeps the calendar the larger half. */
+  tasksWidth: number;
   /** Minutes-before for the fallback reminders (fallback spec §3): what fires
    *  for a timed event that follows its calendar's defaults when the calendar
    *  has none. Popup by construction — omacal never sends email. */
@@ -333,6 +338,12 @@ export const setListMode = (on: boolean) =>
 
 /** Stores the hour height. The backend clamps rather than refuses — the
  *  value comes off a gesture, and "a little past the end" means the end. */
+/** Stores the tasks sidebar's width. Clamped backend-side, like the hour
+ *  height: the number comes off a drag, so the end of the range is a better
+ *  answer than an error under somebody's hand. */
+export const setTasksWidth = (px: number) =>
+  invoke<AppSettings>('set_tasks_width', { px });
+
 export const setHourHeight = (px: number) =>
   invoke<AppSettings>('set_hour_height', { px });
 

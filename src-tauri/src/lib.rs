@@ -1727,6 +1727,7 @@ pub fn run() {
             tasks::task_lists,
             settings::set_list_mode,
             settings::set_hour_height,
+            settings::set_tasks_width,
             settings::set_show_date,
             settings::set_menubar_preferences,
             settings::set_menubar_sections,

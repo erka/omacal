@@ -7,6 +7,7 @@
     createTask, deleteTask, listTasks, setTaskCompleted, taskLists, updateTask,
     type Task, type TaskList,
   } from './tasks';
+  import { TASKS_WIDTH_DEFAULT, TASKS_WIDTH_MAX, TASKS_WIDTH_MIN, clampTasksWidth } from './taskwidth';
   import {
     dateInputValue, dueFromInputs, dueLabel, isOverdue, quickDue, timeInputValue,
     whenOf, WHEN_LABEL, WHEN_ORDER, type When,
@@ -22,11 +23,55 @@
    *  A row opens in place for editing. That is the whole of what a task can
    *  be given here: a title, a due date and a note, which is exactly what a
    *  VTODO carries and this app can write back. */
-  let { onclose, onchange }: {
+  let { onclose, onchange, width = TASKS_WIDTH_DEFAULT, onresize }: {
     onclose: () => void;
     /** Told whenever the set of tasks changed, so the grid can redraw. */
     onchange?: () => void;
+    /** The panel's width in pixels (#130). The caller owns it, because the
+     *  caller is what stores it. */
+    width?: number;
+    /** A width the user just dragged (or stepped with the arrow keys). Sent
+     *  on every move, so the panel follows the hand; the caller decides when
+     *  to write it down. */
+    onresize?: (px: number) => void;
   } = $props();
+
+  /** The edge is the control (#130), the way the grid's own zoom is a
+   *  gesture rather than a field. It is a `separator` with a tab stop, so
+   *  the arrow keys reach a width a mouse-less hand could not. */
+  let resizing = $state(false);
+
+  function startResize(e: PointerEvent) {
+    if (!onresize || e.button !== 0) return;
+    e.preventDefault();
+    const handle = e.currentTarget as HTMLElement;
+    const originX = e.clientX;
+    const from = width;
+    handle.setPointerCapture(e.pointerId);
+    resizing = true;
+    const move = (m: PointerEvent) => onresize(clampTasksWidth(from + (m.clientX - originX)));
+    const done = () => {
+      resizing = false;
+      handle.releasePointerCapture?.(e.pointerId);
+      handle.removeEventListener('pointermove', move);
+      handle.removeEventListener('pointerup', done);
+      handle.removeEventListener('pointercancel', done);
+    };
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', done);
+    handle.addEventListener('pointercancel', done);
+  }
+
+  function resizeKey(e: KeyboardEvent) {
+    if (!onresize) return;
+    const step = e.shiftKey ? 32 : 8;
+    if (e.key === 'ArrowLeft') onresize(clampTasksWidth(width - step));
+    else if (e.key === 'ArrowRight') onresize(clampTasksWidth(width + step));
+    else if (e.key === 'Home') onresize(TASKS_WIDTH_MIN);
+    else if (e.key === 'End') onresize(TASKS_WIDTH_MAX);
+    else return;
+    e.preventDefault();
+  }
 
   let tasks = $state<Task[] | null>(null);
   let lists = $state<TaskList[]>([]);
@@ -178,7 +223,7 @@
   }
 </script>
 
-<aside class="side" aria-label="Tasks">
+<aside class="side" aria-label="Tasks" style="width:{width}px; flex-basis:{width}px">
   <div class="top">
     <h2>Tasks</h2>
     <div class="flex"></div>
@@ -303,11 +348,48 @@
       {/if}
     {/if}
   </div>
+  <!-- The edge, and the whole of the control. `separator` rather than a
+       button: what it does is change a size, and the arrow keys are how it
+       is done without a pointer. -->
+  {#if onresize}
+    <!-- ARIA's window-splitter pattern to the letter: a focusable
+         `separator` carrying the value it moves. Svelte's a11y rules know
+         `separator` only as decoration, and a <button> with the role trips
+         the mirror-image rule, so the two warnings are answered here rather
+         than by wearing the wrong element. -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <div
+      class="resize"
+      class:on={resizing}
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Tasks width"
+      aria-valuenow={width}
+      aria-valuemin={TASKS_WIDTH_MIN}
+      aria-valuemax={TASKS_WIDTH_MAX}
+      tabindex="0"
+      onpointerdown={startResize}
+      onkeydown={resizeKey}
+      ondblclick={() => onresize?.(TASKS_WIDTH_DEFAULT)}
+    ></div>
+  {/if}
 </aside>
 
 <style>
-  .side { width: 288px; flex: 0 0 288px; display: flex; flex-direction: column;
+  .side { position: relative; display: flex; flex-direction: column; flex-grow: 0; flex-shrink: 0;
           min-height: 0; border-right: 1px solid var(--hairline); font-size: 12px; }
+  /* Over the border rather than beside it: a 1px hairline is not something
+     a hand can catch, and a strip that took layout width would move the
+     panel's contents every time the pointer approached. */
+  /* Over the border rather than beside it: a 1px hairline is not something
+     a hand can catch. */
+  .resize { position: absolute; top: 0; bottom: 0; right: -3px; width: 7px; z-index: 2;
+            cursor: col-resize; touch-action: none; }
+  .resize:hover::after, .resize.on::after, .resize:focus-visible::after {
+    content: ''; position: absolute; top: 0; bottom: 0; left: 3px; width: 1px;
+    background: var(--accent); }
+  .resize:focus-visible { outline: none; }
   .top { display: flex; align-items: center; gap: 8px; padding: 12px 10px 10px 14px; }
   h2 { margin: 0; font-size: 13px; font-weight: 600; color: var(--text); }
   .flex { flex-grow: 1; }

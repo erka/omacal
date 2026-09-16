@@ -5576,6 +5576,49 @@ test.describe('the tasks sidebar', () => {
     expect(sideBox!.x + sideBox!.width).toBeLessThanOrEqual(gridBox!.x + 1);
   });
 
+  /** #130: the edge is the control, and what it leaves is kept. The width
+   *  rides `AppSettings` the way the hour zoom does, so a panel widened
+   *  once is that wide again tomorrow. Measured through the separator's own
+   *  `aria-valuenow`: the panel's box carries its 1px border as well. */
+  const widthCalls = (page: import('@playwright/test').Page) =>
+    page.evaluate(() => (window as any).__harness.calls
+      .filter((c: { cmd: string }) => c.cmd === 'set_tasks_width')
+      .map((c: { args: { px: number } }) => c.args.px));
+
+  test('the sidebar is resized by dragging its edge, and the width is stored', async ({ page }) => {
+    const side = await openTasks(page);
+    const grip = side.getByRole('separator', { name: 'Tasks width' });
+    await expect(grip).toHaveAttribute('aria-valuenow', '288');
+    const before = (await side.boundingBox())!.width;
+
+    const g = (await grip.boundingBox())!;
+    await page.mouse.move(g.x + g.width / 2, g.y + g.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(g.x + g.width / 2 + 90, g.y + g.height / 2, { steps: 8 });
+    await page.mouse.up();
+
+    await expect(grip).toHaveAttribute('aria-valuenow', '378');
+    expect(Math.round((await side.boundingBox())!.width - before)).toBe(90);
+    // Written once it settles, not per move (the debounce is 400ms).
+    await expect.poll(async () => await widthCalls(page)).toEqual([378]);
+  });
+
+  test('the arrow keys move the edge, and it is held to the range', async ({ page }) => {
+    const side = await openTasks(page);
+    const grip = side.getByRole('separator', { name: 'Tasks width' });
+    await grip.focus();
+    await page.keyboard.press('ArrowRight');
+    await expect(grip).toHaveAttribute('aria-valuenow', '296');
+    await page.keyboard.press('Shift+ArrowLeft');
+    await expect(grip).toHaveAttribute('aria-valuenow', '264');
+    // The ends: a hand that keeps going lands on the range, not past it.
+    await page.keyboard.press('End');
+    await expect(grip).toHaveAttribute('aria-valuenow', '560');
+    await page.keyboard.press('Home');
+    await expect(grip).toHaveAttribute('aria-valuenow', '220');
+    await expect.poll(async () => (await widthCalls(page)).at(-1)).toBe(220);
+  });
+
   /** One control, one job: the rows regroup and nothing else changes. */
   test('the grouping swaps between By when and By list', async ({ page }) => {
     const side = await openTasks(page);
