@@ -29,8 +29,12 @@ use std::time::Duration;
 const CACHE_KEY: &str = "weather_cache";
 /// When the cache was written, ms epoch.
 const CACHE_AT_KEY: &str = "weather_cache_at";
-/// Auto-detected coordinates, as `lat,lon|Name`, and when they were learned.
+/// Auto-detected coordinates, as `lat,lon|Name` — or `lat,lon|Country|country`
+/// when the connection only told the country — and when they were learned.
 const COORDS_KEY: &str = "weather_coords";
+/// The place set in OmaCal's own Settings (#117), in the Omarchy widget's
+/// file shape: `{name, latitude, longitude}`. Empty or absent means unset.
+pub(crate) const LOCATION_KEY: &str = "weather_location";
 const COORDS_AT_KEY: &str = "weather_coords_at";
 
 /// A sky changes slower than a calendar; Open-Meteo asks heavy users to stay
@@ -107,8 +111,15 @@ pub struct CurrentWeather {
 pub enum LocationSource {
     /// The Omarchy bar's weather setting — the user chose it.
     Configured,
+    /// OmaCal's own Settings (#117) — the user chose it here.
+    Settings,
     /// Learned from the connection's IP.
     Detected,
+    /// The connection's IP told only the country, so the forecast is for
+    /// somewhere near its middle — which can be hundreds of kilometres from
+    /// the user, and the card has to say so (found 2026-09-17: the card read
+    /// "21.997400", the centre of India, as a city name).
+    Country,
     /// Demo mode's fixed sky.
     Demo,
 }
@@ -217,23 +228,85 @@ pub(crate) fn parse_omarchy_location(raw: &str) -> Option<(Option<(f64, f64)>, S
     Some((coords, name))
 }
 
-/// Coordinates and a place name out of a wttr.in `j1` answer — the widget's
+/// What wttr.in's `j1` says about where the connection is: coordinates, the
+/// nearest named area, and its country.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WttrArea {
+    pub lat: f64,
+    pub lon: f64,
+    pub area: String,
+    pub country: String,
+}
+
+/// Coordinates and names out of a wttr.in `j1` answer — the widget's
 /// auto-detect, reading the same fields (`nearest_area`). wttr sends numbers
 /// as strings.
-pub(crate) fn parse_wttr_coords(raw: &str) -> Option<(f64, f64, String)> {
+pub(crate) fn parse_wttr_coords(raw: &str) -> Option<WttrArea> {
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
     let area = v.get("nearest_area")?.get(0)?;
     let num = |k: &str| area.get(k)?.get(0)?.get("value")?.as_str()?.parse::<f64>().ok();
     let lat = area.get("latitude")?.as_str()?.parse::<f64>().ok().or_else(|| num("latitude"))?;
     let lon = area.get("longitude")?.as_str()?.parse::<f64>().ok().or_else(|| num("longitude"))?;
-    let name = area
-        .get("areaName")
-        .and_then(|a| a.get(0))
-        .and_then(|a| a.get("value"))
-        .and_then(|a| a.as_str())
-        .unwrap_or("")
-        .to_string();
-    Some((lat, lon, name))
+    let text = |k: &str| {
+        area.get(k)
+            .and_then(|a| a.get(0))
+            .and_then(|a| a.get("value"))
+            .and_then(|a| a.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    Some(WttrArea { lat, lon, area: text("areaName"), country: text("country") })
+}
+
+/// Whether text is a pair of coordinates (or one number) rather than a
+/// place — what wttr.in's location line holds when its IP lookup found no
+/// city: `21.997400,79.001100`.
+pub(crate) fn is_coordinates(text: &str) -> bool {
+    let parts: Vec<&str> = text.trim().split(',').map(str::trim).collect();
+    !parts.is_empty() && parts.len() <= 2 && parts.iter().all(|p| !p.is_empty() && p.parse::<f64>().is_ok())
+}
+
+/// The name and source an auto-detect ends with, from wttr.in's location
+/// line (`None` when that call failed) and its `j1` area.
+///
+/// - A named line is the place, as the bar prints it.
+/// - A line of **coordinates** means the IP lookup knew only the country and
+///   placed the connection at its middle: the name is the country, and the
+///   source says so, because "Chhindwara" — the nearest town to India's
+///   centroid — would name a city the user is not in.
+/// - No line at all falls back to the area name, as before.
+pub(crate) fn detected_place(line: Option<&str>, area: &WttrArea) -> (Option<String>, LocationSource) {
+    let nonempty = |s: &str| (!s.trim().is_empty()).then(|| s.trim().to_string());
+    match line.map(str::trim).filter(|l| !l.is_empty()) {
+        Some(l) if is_coordinates(l) => (nonempty(&area.country), LocationSource::Country),
+        Some(l) => (wttr_place_name(l).or_else(|| nonempty(&area.area)), LocationSource::Detected),
+        None => (nonempty(&area.area), LocationSource::Detected),
+    }
+}
+
+/// The cached auto-detect, or `None` when there is none worth using — a
+/// cache written before coordinates were recognised holds them as the name,
+/// and is asked again rather than shown again.
+pub(crate) fn parse_cached_coords(v: &str) -> Option<(f64, f64, Option<String>, LocationSource)> {
+    let mut parts = v.splitn(3, '|');
+    let (lat, lon) = parts.next()?.split_once(',')?;
+    let (lat, lon) = (lat.parse().ok()?, lon.parse().ok()?);
+    let name = parts.next().unwrap_or("").trim();
+    if is_coordinates(name) {
+        return None;
+    }
+    let source = if parts.next() == Some("country") { LocationSource::Country } else { LocationSource::Detected };
+    Some((lat, lon, (!name.is_empty()).then(|| name.to_string()), source))
+}
+
+/// The first hit of Open-Meteo's geocoder with the name it resolved to —
+/// what a place typed into Settings is stored as.
+pub(crate) fn parse_geocoded_place(raw: &str) -> Option<(f64, f64, String)> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let hit = v.get("results")?.get(0)?;
+    let name = hit.get("name")?.as_str()?.trim().to_string();
+    Some((hit.get("latitude")?.as_f64()?, hit.get("longitude")?.as_f64()?, name))
 }
 
 /// First hit of Open-Meteo's geocoder, for a widget location that has a name
@@ -322,6 +395,9 @@ fn clock_of(iso: &str) -> String {
 /// `j1` area name still says `Gurgaon`. The first part, so both sides call
 /// the same place by the same name. Blank for a blank answer.
 pub(crate) fn wttr_place_name(line: &str) -> Option<String> {
+    if is_coordinates(line) {
+        return None;
+    }
     let first = line.split(',').next()?.trim();
     (!first.is_empty()).then(|| first.to_string())
 }
@@ -411,6 +487,12 @@ async fn resolve_location(
     pool: &SqlitePool,
     now_ms: i64,
 ) -> Option<(f64, f64, Option<String>, LocationSource)> {
+    // OmaCal's own setting first (#117): the one the user set *here*.
+    if let Some((Some((lat, lon)), name)) =
+        crate::settings::read(pool, LOCATION_KEY).await.as_deref().and_then(parse_omarchy_location)
+    {
+        return Some((lat, lon, Some(name), LocationSource::Settings));
+    }
     if let Some(path) = omarchy_location_path() {
         if let Some((coords, name)) = tokio::fs::read_to_string(&path)
             .await
@@ -438,31 +520,22 @@ async fn resolve_location(
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
     if cache_is_fresh(now_ms, cached_at, COORDS_TTL_MS) {
-        if let Some(v) = crate::settings::read(pool, COORDS_KEY).await {
-            if let Some((coords, name)) = v.split_once('|') {
-                if let Some((lat, lon)) = coords
-                    .split_once(',')
-                    .and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))
-                {
-                    let name = (!name.is_empty()).then(|| name.to_string());
-                    return Some((lat, lon, name, LocationSource::Detected));
-                }
-            }
+        if let Some(hit) = crate::settings::read(pool, COORDS_KEY).await.as_deref().and_then(parse_cached_coords) {
+            return Some(hit);
         }
     }
 
     let raw = http_get("https://wttr.in/?format=j1").await.ok()?;
-    let (lat, lon, area) = parse_wttr_coords(&raw)?;
-    // The bar's spelling of the same place, when wttr.in will say it; the
-    // area name from the answer above otherwise.
-    let name = http_get("https://wttr.in/?format=%l")
-        .await
-        .ok()
-        .and_then(|line| wttr_place_name(&line))
-        .unwrap_or(area);
-    let _ = crate::settings::write(pool, COORDS_KEY, &format!("{lat},{lon}|{name}")).await;
+    let area = parse_wttr_coords(&raw)?;
+    // The bar's spelling of the same place, when wttr.in will say it — and
+    // when it answers with coordinates instead, only the country is known.
+    let line = http_get("https://wttr.in/?format=%l").await.ok();
+    let (name, source) = detected_place(line.as_deref(), &area);
+    let tail = if source == LocationSource::Country { "|country" } else { "" };
+    let cached = format!("{},{}|{}{tail}", area.lat, area.lon, name.as_deref().unwrap_or(""));
+    let _ = crate::settings::write(pool, COORDS_KEY, &cached).await;
     let _ = crate::settings::write(pool, COORDS_AT_KEY, &now_ms.to_string()).await;
-    Some((lat, lon, (!name.is_empty()).then_some(name), LocationSource::Detected))
+    Some((area.lat, area.lon, name, source))
 }
 
 /// Minimal percent-encoding for the one geocoding query parameter — a city
@@ -569,6 +642,43 @@ pub(crate) async fn get_weather(
         return Ok(synthetic_report(jiff::Zoned::now().date(), jiff::Timestamp::now().as_millisecond()));
     }
     Ok(cached_report(&state.pool).await.unwrap_or_default())
+}
+
+/// Sets the place the forecast is for, from OmaCal's Settings (#117), or
+/// clears it back to the Omarchy bar's setting and then the connection.
+///
+/// A typed name is looked up once, here, with Open-Meteo's geocoder, and
+/// stored as the name it resolved to with its coordinates — so a misspelled
+/// city is refused at the field, where it can be fixed, rather than
+/// silently leaving the forecast where it was.
+#[tauri::command]
+pub(crate) async fn set_weather_location(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+    name: Option<String>,
+) -> Result<crate::settings::AppSettings, String> {
+    let wanted = name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+    let stored = match wanted {
+        None => String::new(),
+        Some(n) => {
+            let url = format!(
+                "https://geocoding-api.open-meteo.com/v1/search?name={}&count=1&language=en&format=json",
+                urlencoding_encode(n)
+            );
+            let raw = http_get(&url)
+                .await
+                .map_err(|_| "Could not look that place up — check the connection and try again.".to_string())?;
+            let (lat, lon, resolved) = parse_geocoded_place(&raw)
+                .ok_or_else(|| format!("No place called “{n}” was found. Try the city's name in English."))?;
+            serde_json::json!({ "name": resolved, "latitude": lat, "longitude": lon }).to_string()
+        }
+    };
+    crate::settings::write(&state.pool, LOCATION_KEY, &stored)
+        .await
+        .map_err(|e| crate::errors::user_facing(&e))?;
+    let enabled = crate::settings::weather_enabled(&state.pool).await;
+    refresh_soon(app, state.pool.clone(), state.demo, enabled);
+    Ok(crate::settings::read_settings(&state.pool).await)
 }
 
 /// The last forecast fetched, as cached — the one thing the CLI and the
@@ -734,6 +844,69 @@ mod tests {
         assert_eq!(wttr_place_name(""), None);
     }
 
+    /// Found 2026-09-17: wttr.in answered the location line with coordinates
+    /// — its IP lookup knew only the country — and the card named the city
+    /// "21.997400". Coordinates are never a name; the country is, and the
+    /// source says the connection told no more.
+    #[test]
+    fn coordinates_are_never_a_place_name_and_mean_only_the_country_is_known() {
+        assert!(is_coordinates("21.997400,79.001100\n"));
+        assert!(is_coordinates("21.997400"));
+        assert!(is_coordinates("-33.87, 151.21"));
+        assert!(!is_coordinates("Gurugram, Haryana, India"));
+        assert!(!is_coordinates(""));
+        assert!(!is_coordinates("1,2,3"));
+        assert_eq!(wttr_place_name("21.997400,79.001100"), None);
+
+        let india = WttrArea { lat: 22.067, lon: 78.933, area: "Chhindwara".into(), country: "India".into() };
+        assert_eq!(
+            detected_place(Some("21.997400,79.001100\n"), &india),
+            (Some("India".into()), LocationSource::Country),
+        );
+        assert_eq!(
+            detected_place(Some("Gurugram, Haryana, India"), &india),
+            (Some("Gurugram".into()), LocationSource::Detected),
+        );
+        assert_eq!(detected_place(None, &india), (Some("Chhindwara".into()), LocationSource::Detected));
+        assert_eq!(detected_place(Some("  "), &india), (Some("Chhindwara".into()), LocationSource::Detected));
+        let nameless = WttrArea { country: String::new(), ..india };
+        assert_eq!(detected_place(Some("21.9974,79.0011"), &nameless), (None, LocationSource::Country));
+    }
+
+    /// The cache round-trips the country-only case, and a cache holding
+    /// coordinates as its name — this machine's, written before the fix —
+    /// is asked again rather than shown again.
+    #[test]
+    fn a_cached_detect_keeps_its_source_and_a_coordinate_name_is_discarded() {
+        assert_eq!(
+            parse_cached_coords("28.45,77.033|Gurugram"),
+            Some((28.45, 77.033, Some("Gurugram".into()), LocationSource::Detected)),
+        );
+        assert_eq!(
+            parse_cached_coords("22.067,78.933|India|country"),
+            Some((22.067, 78.933, Some("India".into()), LocationSource::Country)),
+        );
+        assert_eq!(parse_cached_coords("22.067,78.933|21.997400"), None);
+        assert_eq!(parse_cached_coords("22.067,78.933|"), Some((22.067, 78.933, None, LocationSource::Detected)));
+        assert_eq!(parse_cached_coords("junk"), None);
+    }
+
+    /// What a place typed into Settings is stored as: the geocoder's own
+    /// name for it, with its coordinates, in the widget file's shape — which
+    /// the resolver then reads with the widget file's parser.
+    #[test]
+    fn a_place_set_in_settings_is_the_geocoders_name_and_reads_back() {
+        let raw = r#"{"results":[{"latitude":28.46,"longitude":77.03,"name":"Gurugram","country":"India"}]}"#;
+        let (lat, lon, name) = parse_geocoded_place(raw).unwrap();
+        assert_eq!((lat, lon, name.as_str()), (28.46, 77.03, "Gurugram"));
+        assert!(parse_geocoded_place(r#"{"generationtime_ms":0.5}"#).is_none());
+        let stored = serde_json::json!({ "name": name, "latitude": lat, "longitude": lon }).to_string();
+        assert_eq!(parse_omarchy_location(&stored), Some((Some((28.46, 77.03)), "Gurugram".to_string())));
+        assert_eq!(parse_omarchy_location(""), None, "cleared is unset");
+        let wire = serde_json::to_string(&[LocationSource::Settings, LocationSource::Country]).unwrap();
+        assert_eq!(wire, r#"["settings","country"]"#);
+    }
+
     /// Garbage, an empty daily block, and a shape drift all answer `None` —
     /// decoration never invents data.
     #[test]
@@ -767,9 +940,10 @@ mod tests {
         let raw = r#"{"nearest_area":[{
             "areaName":[{"value":"Gurugram"}],
             "latitude":"28.450","longitude":"77.033"}]}"#;
-        let (lat, lon, name) = parse_wttr_coords(raw).unwrap();
-        assert_eq!((lat, lon), (28.45, 77.033));
-        assert_eq!(name, "Gurugram");
+        let a = parse_wttr_coords(raw).unwrap();
+        assert_eq!((a.lat, a.lon), (28.45, 77.033));
+        assert_eq!(a.area, "Gurugram");
+        assert_eq!(a.country, "", "an answer without a country has none, not a guess");
         assert!(parse_wttr_coords(r#"{"nearest_area":[]}"#).is_none());
     }
 

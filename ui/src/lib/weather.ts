@@ -36,7 +36,7 @@ export type CurrentWeather = {
  *  detected place is a guess from the connection's IP and can be a city
  *  off, and a forecast for the wrong place with no way to tell is worse
  *  than none. */
-export type LocationSource = 'configured' | 'detected' | 'demo';
+export type LocationSource = 'configured' | 'settings' | 'detected' | 'country' | 'demo';
 
 export type WeatherReport = {
   days: DayWeather[];
@@ -89,6 +89,10 @@ export const freshness = (
 export const sourceLine = (source: LocationSource | null | undefined): string => {
   switch (source) {
     case 'configured': return "set in the bar's weather panel";
+    case 'settings': return "set in OmaCal's settings";
+    // The connection gave only a country, so this is a forecast for near
+    // its middle — which can be hundreds of kilometres off, and says so.
+    case 'country': return 'only the country is known from your connection — set your city in Settings';
     case 'demo': return 'demo data';
     default: return "from your connection's location, which may be a city off";
   }

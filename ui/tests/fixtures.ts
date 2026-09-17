@@ -1647,6 +1647,17 @@ export const WEATHER_CARD_FIXTURES = {
     day: CARD_LATER, report: { ...CARD_REPORT, place: 'Sofia', source: 'configured' as const },
     today: false, anchor: CARD_ANCHOR, onclose: () => {},
   },
+  /** Set in OmaCal's own Settings (#117). */
+  settings: {
+    day: CARD_LATER, report: { ...CARD_REPORT, place: 'Plovdiv', source: 'settings' as const },
+    today: false, anchor: CARD_ANCHOR, onclose: () => {},
+  },
+  /** The connection told only the country (2026-09-17: the card had named
+   *  the city "21.997400", the coordinates of India's middle). */
+  country: {
+    day: CARD_LATER, report: { ...CARD_REPORT, place: 'India', source: 'country' as const },
+    today: false, anchor: CARD_ANCHOR, onclose: () => {},
+  },
   /** Three days old: the case the age line exists for — every number on
    *  this card is the same shape as the fresh one, and only the age says
    *  not to trust it. */
@@ -2064,14 +2075,16 @@ export const crossZoneWeek = (): WeekPayload => structuredClone(XZONE_GOLDEN);
 /** Two task lists with tasks on both, which is the only shape in which a
  *  picker that filters can be told from one that does not (#68). `Work`
  *  carries a done row as well, so the Done section is filtered too. */
-export const TASK_LISTS: { calendarId: number; name: string; color: string | null }[] = [
-  { calendarId: 1, name: 'Personal', color: '#5b8def' },
-  { calendarId: 2, name: 'Work', color: '#2dd4bf' },
+export const TASK_LISTS: { calendarId: number; name: string; color: string | null; local: boolean }[] = [
+  // Kept on this device, so the pane can rename and delete it; `Work` is a
+  // server's list, which the pane must leave alone.
+  { calendarId: 1, name: 'Personal', color: '#5b8def', local: true },
+  { calendarId: 2, name: 'Work', color: '#2dd4bf', local: false },
 ];
 
 /** The list `create_local_task_list` makes: no server behind it, which is
  *  what a Google-only install can have (Plamen, 2026-09-16). */
-export const LOCAL_TASK_LIST = { calendarId: 77, name: 'Tasks on this device', color: null };
+export const LOCAL_TASK_LIST = { calendarId: 77, name: 'Tasks on this device', color: null, local: true };
 export const TASKS: Task[] = [
   // Dated against `APP_NOW` (Mon 29 Jan 2024), so "By when" has an overdue
   // row, a today row and an undated one — the three groups that differ.

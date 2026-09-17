@@ -178,6 +178,87 @@ pub async fn ensure_local_task_list(
     Ok(calendar_id)
 }
 
+/// Another list on this device, with the name and colour the user gave it.
+///
+/// Not idempotent, unlike [`ensure_local_task_list`]: this is "New list", and
+/// two presses with two names are two lists (the caller refuses a repeated
+/// name). Each gets its own `google_id` — random, since nothing addresses it
+/// but this row — under the same one on-this-device account.
+pub async fn create_local_list(
+    pool: &SqlitePool,
+    name: &str,
+    timezone: &str,
+    color: &str,
+    now_ms: i64,
+) -> anyhow::Result<i64> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO accounts (google_sub, email, display_name, created_at, provider)
+         VALUES (?1, ?1, 'On this device', ?2, ?3)",
+    )
+    .bind(LOCAL_ACCOUNT_SUB)
+    .bind(now_ms)
+    .bind(LOCAL_PROVIDER)
+    .execute(&mut *tx)
+    .await?;
+    let account_id: i64 = sqlx::query_scalar("SELECT id FROM accounts WHERE google_sub = ?1")
+        .bind(LOCAL_ACCOUNT_SUB)
+        .fetch_one(&mut *tx)
+        .await?;
+    let calendar_id: i64 = sqlx::query_scalar(
+        "INSERT INTO calendars
+            (account_id, google_id, summary, color_hex, timezone, access_role, selected,
+             is_primary, sync_enabled, supports_events, supports_tasks)
+         VALUES (?1, 'local:list:' || lower(hex(randomblob(8))), ?2, ?3, ?4, 'owner', 1, 0, 0, 0, 1)
+         RETURNING id",
+    )
+    .bind(account_id)
+    .bind(name)
+    .bind(color)
+    .bind(timezone)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(calendar_id)
+}
+
+/// Renames a list on this device. Its own name, not a label over a
+/// provider's (`set_label_override`): there is no provider name underneath
+/// to go back to, so any override is cleared with it.
+pub async fn rename_local_list(pool: &SqlitePool, calendar_id: i64, name: &str) -> anyhow::Result<()> {
+    if !is_local_calendar(pool, calendar_id).await? {
+        anyhow::bail!("only a list on this device can be renamed here");
+    }
+    sqlx::query("UPDATE calendars SET summary = ?2, label_override = NULL WHERE id = ?1")
+        .bind(calendar_id)
+        .bind(name)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Deletes a list on this device and every task on it, answering how many
+/// tasks went. Refuses anything else: a server's list is the server's to
+/// delete, and removing its row here would only bring it back on the next
+/// sync.
+pub async fn delete_local_list(pool: &SqlitePool, calendar_id: i64) -> anyhow::Result<u64> {
+    if !is_local_calendar(pool, calendar_id).await? {
+        anyhow::bail!("only a list on this device can be deleted here");
+    }
+    let mut tx = pool.begin().await?;
+    let tasks = sqlx::query("DELETE FROM tasks WHERE calendar_id = ?1")
+        .bind(calendar_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    sqlx::query("DELETE FROM calendars WHERE id = ?1")
+        .bind(calendar_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(tasks)
+}
+
 /// Whether this calendar is one of the on-this-device lists: the question
 /// every task write asks before reaching for a server.
 pub async fn is_local_calendar(pool: &SqlitePool, calendar_id: i64) -> anyhow::Result<bool> {
@@ -312,6 +393,49 @@ mod tests {
         let pool = connect_memory().await.unwrap();
         seed(&pool).await;
         pool
+    }
+
+    /// "New list", twice, then a rename and a delete — with the server
+    /// calendars beside them untouched and unreachable.
+    #[tokio::test]
+    async fn lists_on_this_device_are_made_renamed_and_deleted_and_nothing_else_is() {
+        let pool = seeded().await;
+        let default = ensure_local_task_list(&pool, "Tasks on this device", "UTC", 0).await.unwrap();
+        let groceries = create_local_list(&pool, "Groceries", "UTC", "#5aa84f", 1).await.unwrap();
+        let books = create_local_list(&pool, "Books", "UTC", "#e2a03f", 2).await.unwrap();
+        assert_ne!(groceries, books, "two presses, two lists");
+        for id in [default, groceries, books] {
+            assert!(is_local_calendar(&pool, id).await.unwrap());
+        }
+        let row: (String, String, i64, i64, i64) = sqlx::query_as(
+            "SELECT summary, color_hex, supports_tasks, supports_events, selected FROM calendars WHERE id = ?1",
+        )
+        .bind(groceries).fetch_one(&pool).await.unwrap();
+        assert_eq!(row, ("Groceries".into(), "#5aa84f".into(), 1, 0, 1));
+        let accounts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM accounts WHERE provider = 'local'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(accounts, 1, "one on-this-device account holds them all");
+
+        set_label_override(&pool, groceries, Some("Shopping")).await.unwrap();
+        rename_local_list(&pool, groceries, "Food").await.unwrap();
+        let (summary, label): (String, Option<String>) =
+            sqlx::query_as("SELECT summary, label_override FROM calendars WHERE id = ?1")
+                .bind(groceries).fetch_one(&pool).await.unwrap();
+        assert_eq!((summary.as_str(), label), ("Food", None), "a rename is the list's own name");
+
+        for i in 0..3 {
+            sqlx::query("INSERT INTO tasks (calendar_id, uid, status, updated_at) VALUES (?1, ?2, 'needs-action', 0)")
+                .bind(groceries).bind(format!("t{i}")).execute(&pool).await.unwrap();
+        }
+        assert_eq!(delete_local_list(&pool, groceries).await.unwrap(), 3);
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM calendars WHERE id = ?1")
+            .bind(groceries).fetch_one(&pool).await.unwrap();
+        assert_eq!(left, 0);
+
+        let work = list_calendars(&pool).await.unwrap().into_iter().find(|c| c.summary == "Work").unwrap().id;
+        assert!(rename_local_list(&pool, work, "Mine").await.is_err(), "a server's calendar is not renamed here");
+        assert!(delete_local_list(&pool, work).await.is_err(), "nor deleted");
+        assert!(list_calendars(&pool).await.unwrap().iter().any(|c| c.id == work));
     }
 
     #[tokio::test]

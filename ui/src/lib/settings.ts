@@ -207,6 +207,9 @@ export type AppSettings = {
    *  the Omarchy widget's location or the IP), because this is the one
    *  network destination beyond the calendar providers. */
   weatherEnabled: boolean;
+  /** The place set for the forecast in Settings (#117), as the geocoder
+   *  named it; `null` for the bar's setting, else the connection. */
+  weatherLocation?: string | null;
   /** Whether the Location field asks Photon for place suggestions. Off
    *  until chosen — typed text leaves the machine, and Photon's public
    *  server asks for light personal use. History stays on either way. */
@@ -281,6 +284,11 @@ export const setStartOnLogin = (mode: StartOnLogin) =>
 
 /** Stores the weather preference; a turn-on also fetches now, backend-side,
  *  so the headers change while the modal is still open. */
+/** Sets the forecast's place by name, or clears it with `null`. Refused,
+ *  with a sentence to show, for a name the geocoder does not know. */
+export const setWeatherLocation = (name: string | null) =>
+  invoke<AppSettings>('set_weather_location', { name });
+
 export const setWeatherEnabled = (on: boolean) =>
   invoke<AppSettings>('set_weather_enabled', { on });
 

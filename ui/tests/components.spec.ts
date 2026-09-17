@@ -6080,6 +6080,26 @@ test.describe('Weather card', () => {
     await expect(c).not.toContainText('connection');
   });
 
+  /** #117: a place set in OmaCal's own Settings says where it came from. */
+  test('a place set in Settings says so', async ({ page }) => {
+    await page.goto(show('WeatherPopover', 'settings'));
+    const c = card(page, 'Thursday, September 10');
+    await expect(c).toContainText('Plovdiv');
+    await expect(c).toContainText("set in OmaCal's settings");
+    await expect(c).not.toContainText('connection');
+  });
+
+  /** Found 2026-09-17: the connection told only the country, and the card
+   *  named the city "21.997400". Now it names the country and says the
+   *  forecast is no nearer than that. */
+  test('a country-only guess names the country and says to set the city', async ({ page }) => {
+    await page.goto(show('WeatherPopover', 'country'));
+    const c = card(page, 'Thursday, September 10');
+    await expect(c).toContainText('India');
+    await expect(c).toContainText('only the country is known from your connection — set your city in Settings');
+    await expect(c).not.toContainText('a city off');
+  });
+
   /** A cache from before the card: no current, no extras, no place. The
    *  card still opens, says what it can, and calls the unknown place a
    *  detected one — the honest reading of a place nobody chose. */

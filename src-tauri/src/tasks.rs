@@ -582,6 +582,9 @@ pub struct TaskListVm {
     pub calendar_id: i64,
     pub name: String,
     pub color: Option<String>,
+    /// Kept on this machine rather than on a server: the lists the Tasks
+    /// pane can rename and delete.
+    pub local: bool,
 }
 
 /// The task-capable, writable lists, in the order the picker offers them.
@@ -591,8 +594,9 @@ pub struct TaskListVm {
 pub(crate) async fn writable_task_lists(
     pool: &sqlx::SqlitePool,
 ) -> anyhow::Result<Vec<TaskListVm>> {
-    let rows: Vec<(i64, String, Option<String>)> = sqlx::query_as(
-        "SELECT c.id, COALESCE(c.label_override, c.summary), COALESCE(c.color_override, c.color_hex)
+    let rows: Vec<(i64, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT c.id, COALESCE(c.label_override, c.summary), COALESCE(c.color_override, c.color_hex),
+                a.provider
          FROM calendars c JOIN accounts a ON a.id = c.account_id
          WHERE a.provider IN ('caldav', 'local') AND c.supports_tasks = 1
            AND c.selected = 1 AND c.access_role != 'reader'
@@ -602,7 +606,12 @@ pub(crate) async fn writable_task_lists(
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(calendar_id, name, color)| TaskListVm { calendar_id, name, color })
+        .map(|(calendar_id, name, color, provider)| TaskListVm {
+            calendar_id,
+            name,
+            color,
+            local: provider == omacal_store::LOCAL_PROVIDER,
+        })
         .collect())
 }
 
@@ -631,6 +640,102 @@ pub async fn create_local_task_list(
     writable_task_lists(&state.pool)
         .await
         .map_err(|e| crate::errors::user_facing(&e))
+}
+
+/// The colours a new list is given, in order: `theme.ts`'s
+/// `CALENDAR_COLOURS`, the swatches Settings offers for any calendar.
+const LIST_COLOURS: &[&str] = &[
+    "#5b8def", "#2aa198", "#5aa84f", "#8a9a3b", "#e2a03f",
+    "#e07b39", "#e2564a", "#e06c9f", "#9a7bd0", "#7b8a9a",
+];
+
+/// The first swatch no list is wearing yet, so two lists made in a row can be
+/// told apart on the grid; past ten lists, round again.
+fn next_list_colour(lists: &[TaskListVm]) -> &'static str {
+    let used: Vec<String> = lists.iter().filter_map(|l| l.color.as_deref().map(str::to_ascii_lowercase)).collect();
+    LIST_COLOURS
+        .iter()
+        .find(|c| !used.contains(&c.to_string()))
+        .copied()
+        .unwrap_or(LIST_COLOURS[lists.len() % LIST_COLOURS.len()])
+}
+
+/// A list name as given, or the reason it cannot be one: blank, too long, or
+/// the name of another list already — two "Groceries" in the pickers would
+/// leave nobody sure which one a task lands on.
+fn list_name(name: &str, lists: &[TaskListVm], except: Option<i64>) -> anyhow::Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        anyhow::bail!("a list needs a name");
+    }
+    if name.chars().count() > 60 {
+        anyhow::bail!("a list name can be up to 60 characters");
+    }
+    let lower = name.to_lowercase();
+    if lists.iter().any(|l| Some(l.calendar_id) != except && l.name.to_lowercase() == lower) {
+        anyhow::bail!("there is already a list called {name}");
+    }
+    Ok(name.to_string())
+}
+
+/// Makes another task list on this device (2026-09-17, Plamen: lists for
+/// the tasks that sync with nothing). Answers with the lists as the pickers
+/// see them, the new one among them.
+#[tauri::command]
+pub async fn create_task_list(
+    state: tauri::State<'_, AppState>,
+    name: String,
+) -> Result<Vec<TaskListVm>, String> {
+    crate::demo_sync_guard(state.demo)?;
+    create_list_impl(&state, &name).await.map_err(|e| crate::errors::user_facing(&e))
+}
+
+pub(crate) async fn create_list_impl(state: &AppState, name: &str) -> anyhow::Result<Vec<TaskListVm>> {
+    let lists = writable_task_lists(&state.pool).await?;
+    let name = list_name(name, &lists, None)?;
+    let tz = crate::settings::read_settings(&state.pool)
+        .await
+        .display_timezone
+        .unwrap_or_else(|| jiff::tz::TimeZone::system().iana_name().unwrap_or("UTC").to_string());
+    omacal_store::create_local_list(&state.pool, &name, &tz, next_list_colour(&lists), crate::now_ms()).await?;
+    writable_task_lists(&state.pool).await
+}
+
+/// Renames a list on this device. A server's list keeps the name its server
+/// gives it; Settings → Calendars can still label it locally.
+#[tauri::command]
+pub async fn rename_task_list(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+    name: String,
+) -> Result<Vec<TaskListVm>, String> {
+    crate::demo_sync_guard(state.demo)?;
+    rename_list_impl(&state, id, &name).await.map_err(|e| crate::errors::user_facing(&e))
+}
+
+pub(crate) async fn rename_list_impl(state: &AppState, id: i64, name: &str) -> anyhow::Result<Vec<TaskListVm>> {
+    let lists = writable_task_lists(&state.pool).await?;
+    let name = list_name(name, &lists, Some(id))?;
+    omacal_store::rename_local_list(&state.pool, id, &name).await?;
+    crate::upcoming::refresh_soon(state.pool.clone(), state.demo);
+    writable_task_lists(&state.pool).await
+}
+
+/// Deletes a list on this device and its tasks. The pane asks first, naming
+/// how many tasks go with it.
+#[tauri::command]
+pub async fn delete_task_list(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+) -> Result<Vec<TaskListVm>, String> {
+    crate::demo_sync_guard(state.demo)?;
+    delete_list_impl(&state, id).await.map_err(|e| crate::errors::user_facing(&e))
+}
+
+pub(crate) async fn delete_list_impl(state: &AppState, id: i64) -> anyhow::Result<Vec<TaskListVm>> {
+    omacal_store::delete_local_list(&state.pool, id).await?;
+    crate::upcoming::refresh_soon(state.pool.clone(), state.demo);
+    writable_task_lists(&state.pool).await
 }
 
 /// What the on-this-device list is called. Plain, because the pane already
@@ -826,6 +931,50 @@ mod tests {
         }
         assert!(omacal_store::tasks_for_ui(&pool, 0).await.unwrap().is_empty(), "nothing was written");
         create_impl(&state, list, "Here", None, true).await.unwrap();
+    }
+
+    /// "New list" on this device: named, coloured apart, renamed and deleted
+    /// — and refused where a name would be confusing or the list is a
+    /// server's.
+    #[tokio::test]
+    async fn lists_on_this_device_are_created_renamed_and_deleted() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        let state = local_state(pool.clone());
+        let default = omacal_store::ensure_local_task_list(&pool, LOCAL_TASK_LIST_NAME, "UTC", 0).await.unwrap();
+
+        let lists = create_list_impl(&state, "  Groceries ").await.unwrap();
+        let groceries = lists.iter().find(|l| l.name == "Groceries").expect("trimmed and offered");
+        assert!(groceries.local);
+        let lists = create_list_impl(&state, "Books").await.unwrap();
+        let colours: Vec<_> = lists.iter().map(|l| l.color.clone()).collect();
+        assert_eq!(lists.len(), 3);
+        assert_eq!(
+            colours.iter().filter(|c| c.is_some()).count(),
+            2,
+            "the default list has no colour of its own; the new ones each get one"
+        );
+        assert_ne!(colours[0], colours[1], "two new lists are told apart: {colours:?}");
+
+        let refused = |r: anyhow::Result<Vec<TaskListVm>>| r.unwrap_err().to_string();
+        assert_eq!(refused(create_list_impl(&state, "   ").await), "a list needs a name");
+        assert_eq!(refused(create_list_impl(&state, "groceries").await), "there is already a list called groceries");
+        assert!(refused(create_list_impl(&state, &"x".repeat(61)).await).contains("60"));
+
+        let id = groceries.calendar_id;
+        // A rename may keep its own name in another case, not another list's.
+        let lists = rename_list_impl(&state, id, "GROCERIES").await.unwrap();
+        assert!(lists.iter().any(|l| l.calendar_id == id && l.name == "GROCERIES"));
+        assert!(rename_list_impl(&state, id, "Books").await.is_err());
+
+        // A task on it goes with it.
+        create_impl(&state, id, "Milk", None, true).await.unwrap();
+        let lists = delete_list_impl(&state, id).await.unwrap();
+        assert!(!lists.iter().any(|l| l.calendar_id == id));
+        assert!(omacal_store::tasks_for_ui(&pool, 0).await.unwrap().is_empty());
+
+        // The default list is a list like the others.
+        delete_list_impl(&state, default).await.unwrap();
+        assert_eq!(writable_task_lists(&pool).await.unwrap().len(), 1);
     }
 
     /// The list is offered to the pickers, and making it twice makes one.

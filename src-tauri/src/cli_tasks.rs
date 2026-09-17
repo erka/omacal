@@ -13,13 +13,46 @@
 
 use crate::cli::{fail, EXIT_USAGE};
 
+/// Which list `--list` names: its id, or its name as `omacal tasks lists`
+/// prints it. A number is always an id.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ListRef {
+    Id(i64),
+    Name(String),
+}
+
+/// `--list`'s answer against the lists a task can go on: an id passes as it
+/// is (the app refuses one that is not a task list), and a name must match
+/// exactly one list, any case — never the nearest, and never one of two.
+pub(crate) fn resolve_list(
+    list: &Option<ListRef>,
+    lists: &[crate::tasks::TaskListVm],
+) -> Result<Option<i64>, String> {
+    match list {
+        None => Ok(None),
+        Some(ListRef::Id(id)) => Ok(Some(*id)),
+        Some(ListRef::Name(name)) => {
+            let wanted = name.trim().to_lowercase();
+            let hits: Vec<&crate::tasks::TaskListVm> =
+                lists.iter().filter(|l| l.name.to_lowercase() == wanted).collect();
+            match hits.as_slice() {
+                [one] => Ok(Some(one.calendar_id)),
+                [] => Err(format!("no task list is called “{name}” — `omacal tasks lists` names them")),
+                _ => Err(format!(
+                    "more than one list is called “{name}” — use its id from `omacal tasks lists`"
+                )),
+            }
+        }
+    }
+}
+
 /// One change to a task, as the CLI parses it.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum TaskCmd {
     Add {
         summary: String,
         /// Absent means the first list a task can be created on.
-        list: Option<i64>,
+        list: Option<ListRef>,
         due: Option<String>,
         at: Option<String>,
     },
@@ -114,11 +147,11 @@ pub(crate) fn parse(rest: &[&String]) -> Option<Result<TaskCmd, String>> {
         match verb {
             "add" => {
                 let summary = positional()
-                    .ok_or_else(|| "usage: omacal tasks add \"a title\" [--list ID] [--due YYYY-MM-DD] [--at HH:MM]".to_string())?;
-                let list = match take("--list")? {
-                    None => None,
-                    Some(v) => Some(v.parse::<i64>().map_err(|_| "--list takes a list id — `omacal tasks` prints them".to_string())?),
-                };
+                    .ok_or_else(|| "usage: omacal tasks add \"a title\" [--list ID|NAME] [--due YYYY-MM-DD] [--at HH:MM]".to_string())?;
+                let list = take("--list")?.map(|v| match v.parse::<i64>() {
+                    Ok(id) => ListRef::Id(id),
+                    Err(_) => ListRef::Name(v),
+                });
                 Ok(TaskCmd::Add { summary, list, due: take("--due")?, at: take("--at")? })
             }
             "done" => Ok(TaskCmd::Complete { id: id_of("done")?, done: true }),
@@ -169,7 +202,17 @@ pub(crate) async fn execute(pool: &sqlx::SqlitePool, cmd: &TaskCmd, json: bool) 
                 Ok(v) => v,
                 Err(m) => return refuse(&m),
             };
-            (create_request(*list, summary, due_ms, all_day), "Added")
+            let list = match list {
+                Some(ListRef::Name(_)) => match crate::tasks::writable_task_lists(pool).await {
+                    Ok(lists) => match resolve_list(list, &lists) {
+                        Ok(id) => id,
+                        Err(m) => return refuse(&m),
+                    },
+                    Err(e) => return fail(json, "read_failed", &e.to_string(), crate::cli::EXIT_ERROR),
+                },
+                other => resolve_list(other, &[]).unwrap_or(None),
+            };
+            (create_request(list, summary, due_ms, all_day), "Added")
         }
         TaskCmd::Complete { id, done } => {
             (complete_request(*id, *done), if *done { "Completed" } else { "Reopened" })
@@ -272,7 +315,14 @@ pub(crate) fn resolve_edit_due(
         let z = jiff::Timestamp::from_millisecond(ms)
             .unwrap_or(jiff::Timestamp::UNIX_EPOCH)
             .to_zoned(tz.clone());
-        (z.date().to_string(), format!("{:02}:{:02}", z.hour(), z.minute()))
+        // An all-day due is its date in the list's zone, not its stored
+        // midnight read here: a Sofia list's Thursday is Wednesday evening
+        // in New York, and an edit naming only the title kept Wednesday.
+        let date = match (task.due_all_day, task.due_tz.as_deref()) {
+            (true, Some(zone)) => crate::tasks::due_date(ms, Some(zone)),
+            _ => z.date(),
+        };
+        (date.to_string(), format!("{:02}:{:02}", z.hour(), z.minute()))
     });
 
     let date = match due {
@@ -344,7 +394,9 @@ mod tests {
         let flags = argv("--all --json");
         let refs: Vec<&String> = flags.iter().collect();
         assert!(parse(&refs).is_none(), "no verb means the read");
-        assert!(p("add Thing --list nine").is_err());
+        // A number is a list id, and anything else a list's name.
+        assert!(matches!(p("add Thing --list 9"), Ok(TaskCmd::Add { list: Some(ListRef::Id(9)), .. })));
+        assert!(matches!(p("add Thing --list nine"), Ok(TaskCmd::Add { list: Some(ListRef::Name(ref n)), .. }) if n == "nine"));
     }
 
     /// A day alone is a whole day; a day and a time is an instant; a time
@@ -374,6 +426,37 @@ mod tests {
             due_all_day: all_day, status: "needs-action".into(), completed_utc: None,
             priority: 0, raw_ics: None, updated_at: 0,
         }
+    }
+
+    /// `--list Groceries`: exactly one list by that name, in any case, or a
+    /// refusal that says where the names are — never the closest match.
+    #[test]
+    fn a_list_is_named_exactly_once_or_refused() {
+        let list = |id: i64, name: &str| crate::tasks::TaskListVm {
+            calendar_id: id, name: name.into(), color: None, local: true,
+        };
+        let lists = [list(3, "Groceries"), list(4, "Work"), list(5, "work")];
+        let name = |n: &str| Some(ListRef::Name(n.into()));
+        assert_eq!(resolve_list(&name("groceries"), &lists), Ok(Some(3)));
+        assert_eq!(resolve_list(&name(" Groceries "), &lists), Ok(Some(3)));
+        assert!(resolve_list(&name("Grocer"), &lists).unwrap_err().contains("no task list is called “Grocer”"));
+        assert!(resolve_list(&name("WORK"), &lists).unwrap_err().contains("more than one list"));
+        assert_eq!(resolve_list(&Some(ListRef::Id(42)), &lists), Ok(Some(42)), "an id passes; the app judges it");
+        assert_eq!(resolve_list(&None, &lists), Ok(None));
+    }
+
+    /// The audit's zone drift, in the CLI's edit: an all-day task on a Sofia
+    /// list read from New York keeps its Thursday when only the title changes.
+    #[test]
+    fn an_edit_keeps_an_all_day_date_from_another_zone() {
+        let ny = jiff::tz::TimeZone::get("America/New_York").unwrap();
+        // DUE;VALUE=DATE:20260917 on a Sofia list: midnight there.
+        let mut sofia_thursday = stored(Some("2026-09-16T21:00:00Z".parse::<jiff::Timestamp>().unwrap().as_millisecond()), true);
+        sofia_thursday.due_tz = Some("Europe/Sofia".into());
+        let (ms, all_day) = resolve_edit_due(&sofia_thursday, &None, &None, &ny).unwrap();
+        assert!(all_day);
+        let thursday_ny = "2026-09-17T04:00:00Z".parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        assert_eq!(ms, Some(thursday_ny), "Thursday, sent as the CLI's own midnight for the app to date");
     }
 
     /// An edit naming one half of the date takes the other from the task,

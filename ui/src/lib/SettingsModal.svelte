@@ -24,7 +24,7 @@
     setDisplayTimezone, setFallbackReminders, setNotificationsEnabled,
     setAppearance, APPEARANCE_OPTIONS,
     setQuitOnClose, setSecondTimezone, setSyncInterval, setTemperatureUnit, setTimeFormat,
-    setMenubarLabelFormat, setMenubarDateFormat, setMenubarPreferences, setMenubarSections, setShowDate, setTrayIcon, setPhotonPlaces, setWeatherEnabled, setWeekStart,
+    setMenubarLabelFormat, setMenubarDateFormat, setMenubarPreferences, setMenubarSections, setShowDate, setTrayIcon, setPhotonPlaces, setWeatherEnabled, setWeatherLocation, setWeekStart,
     setWeekStartsToday, setWeekViewDays, setVisibleHours,
     type AppSettings, type Appearance, type StartOnLogin, type WeekViewDays,
     type WindowFrame, WINDOW_FRAME_OPTIONS, setWindowFrame,
@@ -548,6 +548,31 @@
     } catch (e) {
       note = { text: String(e), kind: 'error' };
       settings = settings ? { ...settings } : null;
+    }
+  }
+
+  /** The forecast's place, typed (#117). What is in the field while it is
+   *  being typed; the stored name comes back from the geocoder. */
+  let weatherPlace = $state<string | null>(null);
+  let weatherPlaceNote = $state<{ text: string; kind: 'info' | 'error' } | null>(null);
+  let weatherPlaceBusy = $state(false);
+
+  async function saveWeatherPlace(name: string | null) {
+    if (weatherPlaceBusy) return;
+    weatherPlaceBusy = true;
+    weatherPlaceNote = null;
+    try {
+      settings = await setWeatherLocation(name && name.trim() ? name.trim() : null);
+      if (settings) onsettingschange?.(settings);
+      weatherPlace = null;
+      weatherPlaceNote = settings?.weatherLocation
+        ? { text: `Forecast for ${settings.weatherLocation}`, kind: 'info' }
+        : { text: 'Back to your connection’s location', kind: 'info' };
+    } catch (e) {
+      // Left in the field: a misspelling is one letter from right.
+      weatherPlaceNote = { text: String(e).replace(/^Error: /, ''), kind: 'error' };
+    } finally {
+      weatherPlaceBusy = false;
     }
   }
 
@@ -1309,8 +1334,8 @@
       </label>
       <p class="hint">
         A small forecast icon and the day's high, from Open-Meteo.
-        {#if settings?.desktop === 'omarchy'}The location uses your Omarchy weather widget setting when available, otherwise your IP address.
-        {:else}The location comes from your IP address.{/if}
+        {#if settings?.desktop === 'omarchy'}The location is the city set below, else your Omarchy weather widget's setting, else your IP address.
+        {:else}The location is the city set below, else your IP address.{/if}
         Turning this off stops forecast requests.
       </p>
 
@@ -1353,6 +1378,34 @@
         <p class="hint">
           The day headers stay a bare number, same as always — this only
           decides which scale it's read in.
+        </p>
+
+        <!-- #117, and the country-only guess that made it pressing: an IP
+             that names no city puts the forecast at the country's middle. -->
+        <div class="row">
+          <label class="lab" for="weather-location">Weather location</label>
+          <div class="inline">
+            <input id="weather-location" type="text" autocomplete="off" spellcheck="false"
+                   placeholder="From your connection"
+                   disabled={!settings || weatherPlaceBusy}
+                   value={weatherPlace ?? settings?.weatherLocation ?? ''}
+                   oninput={(e) => { weatherPlace = e.currentTarget.value; weatherPlaceNote = null; }}
+                   onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void saveWeatherPlace(weatherPlace ?? settings?.weatherLocation ?? ''); } }} />
+            <button type="button" disabled={!settings || weatherPlaceBusy || (weatherPlace ?? '').trim() === ''}
+                    onclick={() => void saveWeatherPlace(weatherPlace)}>Set</button>
+            {#if settings?.weatherLocation}
+              <button type="button" disabled={weatherPlaceBusy}
+                      onclick={() => void saveWeatherPlace(null)}>Use my connection</button>
+            {/if}
+          </div>
+          {#if weatherPlaceNote}
+            <span class="rownote" class:err={weatherPlaceNote.kind === 'error'}
+                  data-testid="weather-location-note">{weatherPlaceNote.text}</span>
+          {/if}
+        </div>
+        <p class="hint">
+          A city name, looked up once with Open-Meteo. Leave it empty to use
+          your {settings?.desktop === 'omarchy' ? "Omarchy widget's setting or your " : ''}connection's location.
         </p>
       {/if}
 

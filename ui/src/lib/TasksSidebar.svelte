@@ -1,14 +1,14 @@
 <!-- ui/src/lib/TasksSidebar.svelte -->
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { dateFormat } from './date.svelte';
   import { weekStartDay } from './weekstartstore.svelte';
   import DateField from './DateField.svelte';
   import TimeField from './TimeField.svelte';
   import { clockFormat } from './clock.svelte';
   import {
-    createLocalTaskList, createTask, deleteTask, searchDoneTasks, setTaskCompleted, updateTask,
-    type Task,
+    createLocalTaskList, createTask, createTaskList, deleteTask, deleteTaskList, renameTaskList,
+    searchDoneTasks, setTaskCompleted, updateTask, type Task, type TaskList,
   } from './tasks';
   import {
     refreshTasks, setTaskLists, setTaskRows, taskListRows, taskRevision, taskRows,
@@ -122,6 +122,85 @@
     }
   }
 
+  /** A list being named in place: a new one, or an existing one's rename by
+   *  its id. One at a time, like the task editor. */
+  let naming = $state<'new' | number | null>(null);
+  let listName = $state('');
+  let listBusy = $state(false);
+  let listInput: HTMLInputElement | undefined = $state();
+  /** The list whose delete is waiting for a yes. */
+  let confirmingDelete = $state<number | null>(null);
+
+  /** "New list" (2026-09-17, Plamen: lists for the tasks that sync with
+   *  nothing). Lists are what "By list" shows, so that is where the name is
+   *  typed, at the end of them. */
+  async function startNewList() {
+    grouping = 'list';
+    confirmingDelete = null;
+    naming = 'new';
+    listName = '';
+    note = null;
+    await tick();
+    listInput?.focus();
+    listInput?.scrollIntoView({ block: 'nearest' });
+  }
+
+  async function startRename(id: number, name: string) {
+    confirmingDelete = null;
+    naming = id;
+    listName = name;
+    note = null;
+    await tick();
+    listInput?.select();
+  }
+
+  async function saveListName() {
+    if (listBusy || naming === null) return;
+    listBusy = true;
+    note = null;
+    try {
+      const wanted = listName.trim();
+      if (naming === 'new') {
+        const before = new Set(lists.map((l) => l.calendarId));
+        const next = await createTaskList(wanted);
+        setTaskLists(next);
+        // Where the next task typed goes: the list just made for it.
+        const made = next.find((l) => !before.has(l.calendarId));
+        if (made) filterListId = made.calendarId;
+      } else {
+        setTaskLists(await renameTaskList(naming, wanted));
+      }
+      naming = null;
+    } catch (e) {
+      // Left open: the name is one letter from right, not to be typed again.
+      note = String(e);
+    } finally {
+      listBusy = false;
+    }
+  }
+
+  async function deleteList(id: number) {
+    if (listBusy) return;
+    listBusy = true;
+    note = null;
+    try {
+      setTaskLists(await deleteTaskList(id));
+      if (filterListId === id) filterListId = null;
+      if (editingId !== null && (tasks ?? []).find((t) => t.id === editingId)?.calendarId === id) editingId = null;
+      confirmingDelete = null;
+      await load();
+    } catch (e) {
+      note = String(e);
+    } finally {
+      listBusy = false;
+    }
+  }
+
+  const listKeys = (e: KeyboardEvent) => {
+    if (e.key === 'Enter') { e.preventDefault(); void saveListName(); }
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); naming = null; }
+  };
+
   async function load() {
     try {
       await refreshTasks();
@@ -193,21 +272,25 @@
       label: WHEN_LABEL[when],
       warn: when === 'overdue',
       color: null as string | null,
+      list: null as TaskList | null,
       rows: open
         .filter((t) => whenOf(t, nowMs, weekStartDay()) === when)
         .sort((a, b) => (a.dueMs ?? Infinity) - (b.dueMs ?? Infinity)),
     })).filter((g) => g.rows.length > 0),
   );
+  /** Every list, the empty ones too: a list just made has nothing on it yet,
+   *  and one that vanished until it did would look like it was never made. */
   const byList = $derived(
     lists.map((l) => ({
       key: `l${l.calendarId}`,
       label: l.name,
       warn: false,
       color: l.color,
+      list: l,
       rows: open
         .filter((t) => t.calendarId === l.calendarId)
         .sort((a, b) => (a.dueMs ?? Infinity) - (b.dueMs ?? Infinity)),
-    })).filter((g) => g.rows.length > 0),
+    })),
   );
   const groups = $derived(grouping === 'when' ? byWhen : byList);
 
@@ -343,18 +426,28 @@
           {/each}
         </select>
       {/if}
+      <!-- A list of its own for what is being added: made on this device,
+           named where "By list" shows the lists. -->
+      <button type="button" class="newlist" aria-label="New list" title="New list on this device"
+              onclick={() => void startNewList()}>
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">
+          <path d="M3 4.5h6M3 8h6M3 11.5h4M12.5 9v5M10 11.5h5" fill="none" stroke="currentColor"
+                stroke-width="1.4" stroke-linecap="round" />
+        </svg>
+      </button>
     </form>
   {/if}
 
   <div class="rows quiet-scroll">
     {#if tasks === null}
       <p class="empty">Loading…</p>
-    {:else if tasks.length === 0}
+    {:else if tasks.length === 0 && (lists.length === 0 || grouping === 'when')}
       <!-- Two different nothings. With a list, the pane is empty because
            nothing is due; with none, it is empty because there is nowhere to
            put a task — and a Google account never brings one, since Google
            keeps tasks in another product. The button is the way out that
-           needs no server at all. -->
+           needs no server at all. "By list" is neither: it shows the lists,
+           empty ones included, so it falls through to them. -->
       {#if lists.length > 0}
         <p class="empty">No tasks yet.</p>
       {:else}
@@ -370,11 +463,39 @@
       {/if}
     {:else}
       {#each groups as g (g.key)}
-        <div class="head">
+        <div class="head" class:listhead={g.list !== null}>
           {#if g.color}<span class="tick" style:background={g.color}></span>{/if}
-          <span class="hlabel" class:warn={g.warn}>{g.label}</span>
-          <span class="count">{g.rows.length}</span>
+          {#if g.list && naming === g.list.calendarId}
+            <input class="lname" aria-label="List name" bind:this={listInput} bind:value={listName}
+                   disabled={listBusy} onkeydown={listKeys} />
+            <button type="button" class="lact on" onclick={() => void saveListName()} disabled={listBusy}>Save</button>
+            <button type="button" class="lact" onclick={() => (naming = null)}>Cancel</button>
+          {:else}
+            <span class="hlabel" class:warn={g.warn}>{g.label}</span>
+            <span class="count">{g.rows.length}</span>
+            {#if g.list?.local}
+              <!-- Only a list on this device is this pane's to rename or
+                   delete; a server's list is the server's. -->
+              <span class="lacts">
+                <button type="button" class="lact" aria-label="Rename {g.label}"
+                        onclick={() => void startRename(g.list!.calendarId, g.list!.name)}>Rename</button>
+                <button type="button" class="lact" aria-label="Delete {g.label}"
+                        onclick={() => { naming = null; confirmingDelete = g.list!.calendarId; }}>Delete</button>
+              </span>
+            {/if}
+          {/if}
         </div>
+        {#if g.list && confirmingDelete === g.list.calendarId}
+          <div class="confirm" role="alert">
+            <span>Delete “{g.label}” and all its tasks, done ones too?</span>
+            <button type="button" class="lact danger" onclick={() => void deleteList(g.list!.calendarId)}
+                    disabled={listBusy}>Delete list</button>
+            <button type="button" class="lact" onclick={() => (confirmingDelete = null)}>Keep</button>
+          </div>
+        {/if}
+        {#if g.list && g.rows.length === 0}
+          <p class="empty nothing">Nothing on this list.</p>
+        {/if}
         {#each g.rows as t (t.id)}
           {#if editingId === t.id}
             <!-- The row, open where it sits. Nothing moves and nothing
@@ -431,6 +552,18 @@
           {/if}
         {/each}
       {/each}
+
+      {#if grouping === 'list' && naming === 'new'}
+        <div class="head listhead">
+          <input class="lname" aria-label="New list name" placeholder="List name" bind:this={listInput}
+                 bind:value={listName} disabled={listBusy} onkeydown={listKeys} />
+          <button type="button" class="lact on" onclick={() => void saveListName()}
+                  disabled={listBusy || listName.trim() === ''}>Create</button>
+          <button type="button" class="lact" onclick={() => (naming = null)}>Cancel</button>
+        </div>
+      {:else if grouping === 'list'}
+        <button type="button" class="earlier-toggle" onclick={() => void startNewList()}>+ New list</button>
+      {/if}
 
       {#if done.length > 0}
         <div class="head"><span class="hlabel">Done today</span><span class="count">{done.length}</span></div>
@@ -536,6 +669,28 @@
                border: 1px solid var(--hairline); background: var(--surface); color: var(--text); }
   .add select { font: inherit; border-radius: 7px; border: 1px solid var(--hairline);
                 background: var(--surface); color: var(--text); padding: 0 6px; max-width: 96px; }
+  .newlist { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto;
+             width: 30px; border-radius: 7px; border: 1px solid var(--hairline); cursor: pointer;
+             background: var(--surface); color: var(--text); padding: 0; }
+  .newlist:hover { background: color-mix(in srgb, var(--text) 8%, var(--surface)); }
+  /* A list's heading carries its own two actions, quiet until pointed at or
+     reached by the keyboard, so a pane of lists reads as a pane of lists. */
+  .lacts { margin-left: auto; display: inline-flex; gap: 2px; opacity: 0; }
+  .listhead:hover .lacts, .listhead:focus-within .lacts { opacity: 1; }
+  .lact { appearance: none; -webkit-appearance: none; font: inherit; font-size: 10.5px;
+          color: var(--muted); background: none; border: 0; border-radius: 4px; cursor: pointer;
+          padding: 2px 5px; }
+  .lact:hover:not(:disabled) { color: var(--text); background: color-mix(in srgb, var(--text) 8%, transparent); }
+  .lact.on { color: var(--accent); }
+  .lact.danger { color: var(--error); }
+  .lact:disabled { opacity: .5; cursor: default; }
+  .lname { flex: 1; min-width: 0; font: inherit; font-size: 12px; padding: 3px 7px; border-radius: 5px;
+           border: 1px solid var(--accent); background: var(--bg); color: var(--text); }
+  .confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin: 0 6px 6px;
+             padding: 6px 8px; border-radius: 6px; font-size: 11.5px;
+             background: color-mix(in srgb, var(--error) 10%, transparent); }
+  .confirm span { flex-basis: 100%; }
+  .nothing { padding: 2px 6px 6px; font-size: 11.5px; }
 
   .rows { flex-grow: 1; overflow-y: auto; padding: 0 8px 12px; }
   .head { display: flex; align-items: center; gap: 7px; padding: 10px 6px 5px; }

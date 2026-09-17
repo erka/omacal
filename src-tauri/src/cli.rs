@@ -47,7 +47,8 @@ USAGE
   omacal search <query> [--json]           titles, nearest to today first
   omacal calendars [--json]                every calendar, with ids
   omacal tasks [--all] [--json]            what still needs doing, with ids
-  omacal tasks add \"title\" [--list ID] [--due YYYY-MM-DD] [--at HH:MM]
+  omacal tasks lists [--json]              the lists a task can go on, with ids
+  omacal tasks add \"title\" [--list ID|NAME] [--due YYYY-MM-DD] [--at HH:MM]
   omacal tasks done ID | omacal tasks reopen ID
   omacal tasks edit ID [--title T] [--due D|none] [--at HH:MM|none] [--notes N|none]
   omacal weather [--json]                  the app's forecast, and the place it is for
@@ -111,6 +112,8 @@ pub(crate) enum Command {
     /// adds the recently completed, which the window keeps in its own
     /// section rather than in the list.
     Tasks { all: bool },
+    /// `omacal tasks lists`: every list a task can be added to.
+    TaskLists,
     /// The forecast the window shows, off the same cache — and where it is
     /// for, since that place may not be where the user is.
     Weather,
@@ -184,7 +187,10 @@ pub(crate) fn command_catalog() -> Vec<CommandInfo> {
         CommandInfo { name: "tasks", usage: "tasks [--all]", writes: false,
             description: "what still needs doing, with due dates and ids",
             flags: &["--all", "--json"] },
-        CommandInfo { name: "tasks add", usage: "tasks add \"title\" [--list ID] [--due D] [--at HH:MM]", writes: true,
+        CommandInfo { name: "tasks lists", usage: "tasks lists", writes: false,
+            description: "the task lists a task can be added to, with ids, where each is kept and how many tasks are open",
+            flags: &["--json"] },
+        CommandInfo { name: "tasks add", usage: "tasks add \"title\" [--list ID|NAME] [--due D] [--at HH:MM]", writes: true,
             description: "add a task to a list",
             flags: &["--list", "--due", "--at", "--json"] },
         CommandInfo { name: "tasks done", usage: "tasks done|reopen ID", writes: true,
@@ -255,6 +261,11 @@ pub(crate) fn parse(argv: &[String]) -> Option<Result<Invocation, String>> {
         },
         "calendars" => build(Command::Calendars),
         "tasks" => {
+            // `lists` is a read, like the bare word; every other verb is a
+            // change, and changes go over the socket.
+            if rest.iter().find(|a| !a.starts_with("--")).map(|a| a.as_str()) == Some("lists") {
+                return build(Command::TaskLists);
+            }
             // A verb means a change, and changes go over the socket.
             if let Some(parsed) = crate::cli_tasks::parse(&rest) {
                 return Some(parsed.map(|cmd| Invocation {
@@ -723,6 +734,30 @@ fn task_json(row: &omacal_store::TaskRow, now_ms: i64, tz: &jiff::tz::TimeZone) 
     })
 }
 
+/// One task list, as an agent consumes it: the id `--list` takes, the name
+/// it also takes, whether it lives on this machine, and how many tasks are
+/// still open on it.
+fn task_list_json(l: &crate::tasks::TaskListVm, open: usize) -> serde_json::Value {
+    serde_json::json!({
+        "id": l.calendar_id,
+        "name": l.name,
+        "onThisDevice": l.local,
+        "color": l.color,
+        "open": open,
+    })
+}
+
+/// The lists as a person reads them: id, name, how many open, and where.
+fn task_list_lines(lists: &[crate::tasks::TaskListVm], open: impl Fn(i64) -> usize) -> Vec<String> {
+    lists
+        .iter()
+        .map(|l| {
+            let where_ = if l.local { ", on this device" } else { "" };
+            format!("{:>5}  {}  ({} open{where_})", l.calendar_id, l.name, open(l.calendar_id))
+        })
+        .collect()
+}
+
 /// A due date on the wire: the date an all-day due names, and an instant
 /// with its display-zone offset when it has an hour.
 ///
@@ -808,6 +843,8 @@ pub(crate) fn weather_lines(
     let place = report.place.clone().unwrap_or_else(|| "Unknown place".into());
     let how = match report.source {
         Some(LocationSource::Configured) => "set in the bar's weather panel",
+        Some(LocationSource::Settings) => "set in OmaCal's settings",
+        Some(LocationSource::Country) => "only the country is known from your connection — set your city in Settings",
         Some(LocationSource::Demo) => "demo data",
         // An older cache carries no source; it was detected, which is the
         // honest thing to say about a place nobody chose.
@@ -999,6 +1036,21 @@ pub(crate) fn run(inv: Invocation) -> i32 {
                         println!("Nothing to do.");
                     } else {
                         for line in task_lines(&open, crate::now_ms(), &tz) {
+                            println!("{line}");
+                        }
+                    }
+                    Ok(EXIT_OK)
+                }
+                Command::TaskLists => {
+                    let lists = crate::tasks::writable_task_lists(&pool).await?;
+                    let rows = omacal_store::tasks_for_ui(&pool, crate::now_ms()).await?;
+                    let open = |id: i64| rows.iter().filter(|r| r.task.calendar_id == id && r.task.status != "completed").count();
+                    if inv.json {
+                        print_json(&lists.iter().map(|l| task_list_json(l, open(l.calendar_id))).collect::<Vec<_>>());
+                    } else if lists.is_empty() {
+                        println!("No task lists — make one in the app's Tasks pane, or connect an iCloud or CalDAV account.");
+                    } else {
+                        for line in task_list_lines(&lists, open) {
                             println!("{line}");
                         }
                     }
@@ -1313,6 +1365,23 @@ mod tests {
         s.parse::<jiff::Timestamp>().unwrap().as_millisecond()
     }
 
+    /// `omacal tasks lists`: the id `--list` takes, the name it also takes,
+    /// where the list is kept and what is open on it.
+    #[test]
+    fn task_lists_print_their_ids_names_and_where_they_live() {
+        let lists = [
+            crate::tasks::TaskListVm { calendar_id: 3, name: "Groceries".into(), color: Some("#5aa84f".into()), local: true },
+            crate::tasks::TaskListVm { calendar_id: 12, name: "Work".into(), color: None, local: false },
+        ];
+        let open = |id: i64| if id == 3 { 2 } else { 0 };
+        assert_eq!(task_list_lines(&lists, open), [
+            "    3  Groceries  (2 open, on this device)",
+            "   12  Work  (0 open)",
+        ]);
+        let j = task_list_json(&lists[0], 2);
+        assert_eq!(j, serde_json::json!({ "id": 3, "name": "Groceries", "onThisDevice": true, "color": "#5aa84f", "open": 2 }));
+    }
+
     /// The sidebar says "Today" for a task due today, all day; the CLI said
     /// "overdue" from 00:01 (found 2026-09-17), and SKILL.md tells agents to
     /// trust `overdue`.
@@ -1470,7 +1539,7 @@ mod tests {
         let names: Vec<&str> = catalog.iter().map(|c| c.name).collect();
         for required in [
             "agenda", "events list", "events show", "events create", "events update",
-            "events delete", "events respond", "search", "calendars", "tasks", "tasks add",
+            "events delete", "events respond", "search", "calendars", "tasks", "tasks lists", "tasks add",
             "tasks done", "tasks edit", "weather", "doctor", "skill", "commands", "cli-help",
         ] {
             assert_eq!(
@@ -1479,7 +1548,7 @@ mod tests {
                 "{required} appears exactly once"
             );
         }
-        assert_eq!(names.len(), 18, "nothing in the catalog the parser does not answer");
+        assert_eq!(names.len(), 19, "nothing in the catalog the parser does not answer");
         let writers: Vec<&str> =
             catalog.iter().filter(|c| c.writes).map(|c| c.name).collect();
         assert_eq!(
@@ -1503,6 +1572,10 @@ mod tests {
         assert_eq!(
             parse(&argv("tasks --all --json")),
             Some(Ok(Invocation { command: Command::Tasks { all: true }, json: true }))
+        );
+        assert_eq!(
+            parse(&argv("tasks lists --json")),
+            Some(Ok(Invocation { command: Command::TaskLists, json: true }))
         );
         for verb in ["add Thing", "done 4", "reopen 4", "edit 4 --title T"] {
             let parsed = parse(&argv(&format!("tasks {verb}")));
@@ -1552,6 +1625,13 @@ mod tests {
 
         let configured = WeatherReport { source: Some(LocationSource::Configured), ..report.clone() };
         assert_eq!(weather_lines(&configured, false, now)[0], "Gurugram (set in the bar's weather panel)");
+        let settings = WeatherReport { source: Some(LocationSource::Settings), ..report.clone() };
+        assert_eq!(weather_lines(&settings, false, now)[0], "Gurugram (set in OmaCal's settings)");
+        let country = WeatherReport { place: Some("India".into()), source: Some(LocationSource::Country), ..report.clone() };
+        assert_eq!(
+            weather_lines(&country, false, now)[0],
+            "India (only the country is known from your connection — set your city in Settings)"
+        );
 
         let old = WeatherReport {
             days: vec![DayWeather {

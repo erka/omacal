@@ -6124,6 +6124,155 @@ test.describe('tasks, the grid and the sidebar agree', () => {
 });
 
 /**
+ * The forecast's place, set in OmaCal (#117) — pressing since 2026-09-17,
+ * when an IP that named no city put the forecast in the middle of India.
+ */
+test.describe('weather location in Settings', () => {
+  const openAppearance = async (page: Page) => {
+    await page.goto(app());
+    await page.getByRole('button', { name: 'Menu', exact: true }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Appearance', exact: true }).click();
+    return modal;
+  };
+  const lastCall = (page: Page) => page.evaluate(() =>
+    (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_weather_location').pop()?.args);
+
+  test('a city is set, refused when unknown, and cleared back to the connection', async ({ page }) => {
+    const modal = await openAppearance(page);
+    const field = modal.getByLabel('Weather location');
+    await expect(field).toHaveValue('');
+    await expect(field).toHaveAttribute('placeholder', 'From your connection');
+    await expect(modal.getByRole('button', { name: 'Use my connection' })).toHaveCount(0);
+
+    // Unknown: refused where it can be fixed, and the typing stays.
+    await field.fill('Nowhereville');
+    await field.press('Enter');
+    await expect(modal.getByTestId('weather-location-note')).toContainText('No place called “Nowhereville” was found');
+    await expect(field).toHaveValue('Nowhereville');
+
+    await field.fill('plovdiv');
+    await modal.getByRole('button', { name: 'Set', exact: true }).click();
+    await expect.poll(() => lastCall(page)).toEqual({ name: 'plovdiv' });
+    await expect(modal.getByTestId('weather-location-note')).toHaveText('Forecast for Plovdiv');
+    // The name the geocoder resolved, not the one typed.
+    await expect(field).toHaveValue('Plovdiv');
+
+    await modal.getByRole('button', { name: 'Use my connection' }).click();
+    await expect.poll(() => lastCall(page)).toEqual({ name: null });
+    await expect(field).toHaveValue('');
+    await expect(modal.getByTestId('weather-location-note')).toHaveText('Back to your connection’s location');
+  });
+});
+
+/**
+ * Lists for the tasks kept on this machine (2026-09-17, Plamen): "New list",
+ * a rename and a delete, for those lists only — a server's list is the
+ * server's.
+ */
+test.describe('task lists on this device', () => {
+  const openTasks = async (page: Page) => {
+    await page.clock.setFixedTime(APP_NOW);
+    await page.goto(app());
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Tasks…' }).click();
+    return page.getByRole('complementary', { name: 'Tasks' });
+  };
+  const lastCall = (page: Page, cmd: string) => page.evaluate((c) =>
+    (window as any).__harness.calls.filter((x: any) => x.cmd === c).pop()?.args, cmd);
+  const heading = (side: ReturnType<Page['getByRole']>, name: string) =>
+    side.locator('.listhead', { has: side.page().locator('.hlabel', { hasText: new RegExp(`^${name}$`) }) });
+
+  test('New list makes a named list, and the next task lands on it', async ({ page }) => {
+    const side = await openTasks(page);
+    await side.getByRole('button', { name: 'New list', exact: true }).click();
+    // Lists are what "By list" shows, so that is where the name is typed.
+    await expect(side.getByRole('button', { name: 'By list' })).toHaveAttribute('aria-pressed', 'true');
+    const field = side.getByRole('textbox', { name: 'New list name' });
+    await expect(field).toBeFocused();
+    await field.fill('Groceries');
+    await field.press('Enter');
+
+    await expect.poll(() => lastCall(page, 'create_task_list')).toEqual({ name: 'Groceries' });
+    await expect(heading(side, 'Groceries')).toBeVisible();
+    await expect(side.getByText('Nothing on this list.')).toBeVisible();
+    // Where the next task goes: the list just made for it.
+    const list = side.getByRole('combobox', { name: 'Task list' });
+    await expect(list.locator('option:checked')).toHaveText('Groceries');
+    await side.getByRole('textbox', { name: 'New task title' }).fill('Milk');
+    await side.getByRole('textbox', { name: 'New task title' }).press('Enter');
+    const made = await lastCall(page, 'create_task');
+    const lists = await page.evaluate(() => (window as any).__TAURI_INTERNALS__.invoke('task_lists'));
+    expect(made.calendarId).toBe(lists.find((l: any) => l.name === 'Groceries').calendarId);
+    await expect(side.getByText('Nothing on this list.')).toHaveCount(0);
+  });
+
+  test('a blank or taken name is refused, and the name stays to be fixed', async ({ page }) => {
+    const side = await openTasks(page);
+    await side.getByRole('button', { name: 'New list', exact: true }).click();
+    const field = side.getByRole('textbox', { name: 'New list name' });
+    await expect(side.getByRole('button', { name: 'Create' })).toBeDisabled();
+    await field.fill('work');
+    await field.press('Enter');
+    await expect(side.getByRole('alert').filter({ hasText: 'there is already a list called work' })).toBeVisible();
+    await expect(field).toHaveValue('work');
+    await field.fill('Side projects');
+    await field.press('Enter');
+    await expect(heading(side, 'Side projects')).toBeVisible();
+  });
+
+  test('a list on this device can be renamed', async ({ page }) => {
+    const side = await openTasks(page);
+    await side.getByRole('button', { name: 'By list' }).click();
+    await side.getByRole('button', { name: 'Rename Personal' }).click();
+    const field = side.getByRole('textbox', { name: 'List name' });
+    await expect(field).toHaveValue('Personal');
+    await field.fill('Home');
+    await field.press('Enter');
+    await expect.poll(() => lastCall(page, 'rename_task_list')).toEqual({ id: 1, name: 'Home' });
+    await expect(heading(side, 'Home')).toBeVisible();
+    await expect(side.getByRole('combobox', { name: 'Task list' }).locator('option', { hasText: 'Home' })).toHaveCount(1);
+  });
+
+  test('deleting a list asks first, and takes its tasks with it', async ({ page }) => {
+    const side = await openTasks(page);
+    await side.getByRole('button', { name: 'By list' }).click();
+    await side.getByRole('button', { name: 'Delete Personal' }).click();
+    await expect(side.getByText('Delete “Personal” and all its tasks, done ones too?')).toBeVisible();
+    await side.getByRole('button', { name: 'Keep' }).click();
+    await expect(heading(side, 'Personal')).toBeVisible();
+    expect(await lastCall(page, 'delete_task_list')).toBeUndefined();
+
+    await side.getByRole('button', { name: 'Delete Personal' }).click();
+    await side.getByRole('button', { name: 'Delete list' }).click();
+    await expect.poll(() => lastCall(page, 'delete_task_list')).toEqual({ id: 1 });
+    await expect(heading(side, 'Personal')).toHaveCount(0);
+    await expect(side.getByText('Buy milk')).toHaveCount(0);
+  });
+
+  test('a server\'s list has no rename or delete here', async ({ page }) => {
+    const side = await openTasks(page);
+    await side.getByRole('button', { name: 'By list' }).click();
+    await expect(heading(side, 'Work')).toBeVisible();
+    await expect(side.getByRole('button', { name: 'Rename Work' })).toHaveCount(0);
+    await expect(side.getByRole('button', { name: 'Delete Work' })).toHaveCount(0);
+  });
+
+  test('Escape leaves a name unsaved and the pane open', async ({ page }) => {
+    const side = await openTasks(page);
+    await side.getByRole('button', { name: 'By list' }).click();
+    await side.getByRole('button', { name: 'Rename Personal' }).click();
+    await side.getByRole('textbox', { name: 'List name' }).fill('Nope');
+    await page.keyboard.press('Escape');
+    await expect(side.getByRole('textbox', { name: 'List name' })).toHaveCount(0);
+    await expect(heading(side, 'Personal')).toBeVisible();
+    await expect(side).toBeVisible();
+    expect(await lastCall(page, 'rename_task_list')).toBeUndefined();
+  });
+});
+
+/**
  * The task editor's time field (2026-09-17, by request): the native one was
  * a small box whose empty state read as "12:30 PM", edited a segment at a
  * time. This one is typed or picked from a list, in the app's own clock.

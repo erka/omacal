@@ -25,6 +25,8 @@ export type TaskList = {
   calendarId: number;
   name: string;
   color: string | null;
+  /** Kept on this machine: the lists the Tasks pane can rename and delete. */
+  local: boolean;
 };
 
 export const listTasks = () => invoke<Task[]>('list_tasks');
@@ -44,6 +46,17 @@ export const taskLists = () => invoke<TaskList[]>('task_lists');
  *  no task list and no way to make one: Google keeps tasks in a different
  *  product with a different API. */
 export const createLocalTaskList = () => invoke<TaskList[]>('create_local_task_list');
+
+/** Another list on this device, named; answers with the lists, it among
+ *  them. Refused for a blank name or one another list already has. */
+export const createTaskList = (name: string) => invoke<TaskList[]>('create_task_list', { name });
+
+/** Renames a list on this device. */
+export const renameTaskList = (id: number, name: string) =>
+  invoke<TaskList[]>('rename_task_list', { id, name });
+
+/** Deletes a list on this device, and every task on it. */
+export const deleteTaskList = (id: number) => invoke<TaskList[]>('delete_task_list', { id });
 
 /** Completes (or reopens) a task — the server first, then the store, which is
  *  why the fresh list comes back from the same call. */

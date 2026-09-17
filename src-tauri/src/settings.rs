@@ -598,6 +598,9 @@ pub struct AppSettings {
     /// destination beyond the calendar providers, which is why the off
     /// switch exists and the settings hint names where the data comes from.
     pub weather_enabled: bool,
+    /// The place set for the forecast in Settings (#117), as the geocoder
+    /// named it, or `None` for "the bar's setting, else the connection".
+    pub weather_location: Option<String>,
     /// Whether the Location field asks Photon (OpenStreetMap) for place
     /// suggestions. **Off by default**: the query leaves the machine, and
     /// Photon's public server asks for light personal use. History
@@ -925,6 +928,11 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
         // `notifications_enabled`'s polarity and reasoning: on unless
         // somebody turned it off.
         weather_enabled: weather_enabled(pool).await,
+        weather_location: read(pool, crate::weather::LOCATION_KEY)
+            .await
+            .as_deref()
+            .and_then(crate::weather::parse_omarchy_location)
+            .map(|(_, name)| name),
         // Off unless this version wrote `"1"`: every install that predates
         // the setting must keep sending only an IP to the weather service,
         // not typed locations to a third party.

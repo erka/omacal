@@ -11,7 +11,8 @@ pub mod invites;
 pub mod reminders;
 pub mod tasks;
 pub use calendars::{
-    ensure_local_task_list, is_local_calendar, LOCAL_PROVIDER,
+    create_local_list, delete_local_list, ensure_local_task_list, is_local_calendar, rename_local_list,
+    LOCAL_PROVIDER,
     calendar_for_write, delete_account, list_calendars, set_color_override, set_label_override, set_selected,
     set_sync_enabled, CalendarRow,
 };

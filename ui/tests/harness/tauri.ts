@@ -667,6 +667,7 @@ type StubSettings = {
   displayTimezone: string | null;
   secondTimezone: string | null;
   weatherEnabled: boolean;
+  weatherLocation: string | null;
   photonPlaces: boolean;
   temperatureUnit: TemperatureUnit;
   startOnLogin: StartOnLogin;
@@ -746,6 +747,7 @@ const DEFAULT_SETTINGS: StubSettings = {
   secondTimezone: null,
   // The backend's default: on unless somebody turned it off.
   weatherEnabled: true,
+  weatherLocation: null,
   // Off until asked: typed locations do not leave the machine on a
   // fresh install, and Photon's public server asks for light use.
   photonPlaces: false,
@@ -1035,6 +1037,17 @@ export function installTauriStub(scenario: string): Harness {
         return stale
           ? { ...APP_WEATHER, fetched_at: (APP_WEATHER.fetched_at ?? Date.now()) - 3 * 24 * 3600_000 }
           : APP_WEATHER;
+      }
+      // The geocoder, played: one name it cannot find, and every other name
+      // resolved to itself with a capital, as Open-Meteo answers.
+      case 'set_weather_location': {
+        const name = ((args.name as string | null) ?? '').trim();
+        if (name.toLowerCase() === 'nowhereville') {
+          throw new Error(`No place called “${name}” was found. Try the city's name in English.`);
+        }
+        const resolved = name ? name[0].toUpperCase() + name.slice(1) : null;
+        settings = saveSettings({ ...settings, weatherLocation: resolved });
+        return { ...settings };
       }
       case 'set_weather_enabled':
         settings = saveSettings({ ...settings, weatherEnabled: args.on as boolean });
@@ -1326,6 +1339,37 @@ export function installTauriStub(scenario: string): Harness {
           taskLists = [...taskLists, LOCAL_TASK_LIST];
         }
         return taskLists;
+      // `tasks::list_name`'s rules, and a new list gets the next id.
+      case 'create_task_list':
+      case 'rename_task_list': {
+        const name = String(args.name).trim();
+        const except = cmd === 'rename_task_list' ? (args.id as number) : null;
+        if (!name) throw new Error('a list needs a name');
+        if (taskLists.some((l) => l.calendarId !== except && l.name.toLowerCase() === name.toLowerCase())) {
+          throw new Error(`there is already a list called ${name}`);
+        }
+        if (except === null) {
+          const id = Math.max(100, ...taskLists.map((l) => l.calendarId)) + 1;
+          taskLists = [...taskLists, { calendarId: id, name, color: '#5aa84f', local: true }];
+        } else {
+          if (!taskLists.find((l) => l.calendarId === except)?.local) {
+            throw new Error('only a list on this device can be renamed here');
+          }
+          taskLists = taskLists.map((l) => (l.calendarId === except ? { ...l, name } : l));
+          taskRows = taskRows.map((t) => (t.calendarId === except ? { ...t, calendar: name } : t));
+        }
+        return taskLists;
+      }
+      case 'delete_task_list': {
+        const id = args.id as number;
+        if (!taskLists.find((l) => l.calendarId === id)?.local) {
+          throw new Error('only a list on this device can be deleted here');
+        }
+        taskLists = taskLists.filter((l) => l.calendarId !== id);
+        taskRows = taskRows.filter((t) => t.calendarId !== id);
+        doneHistory = doneHistory.filter((t) => t.calendarId !== id);
+        return taskLists;
+      }
       case 'create_task': {
         const listId = args.calendarId as number;
         const list = taskLists.find((l) => l.calendarId === listId)!;

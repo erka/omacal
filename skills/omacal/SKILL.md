@@ -27,6 +27,8 @@ omacal weather --json                # the app's forecast (v2.2+): place +
 omacal tasks --json                  # what still needs doing (v2.3+), with
                                      # due dates, ids and which list
 omacal tasks --all --json            # including recently completed
+omacal tasks lists --json            # the lists a task can go on (v4.5+):
+                                     # id, name, onThisDevice, open count
 omacal commands --json               # machine-readable catalog of every
                                      # command and flag (v0.8.1+) — check
                                      # here before assuming a flag exists
@@ -63,6 +65,7 @@ is Google's model and says nothing reliable about who else sees a change.
 ```bash
 omacal tasks add "Renew the domain" --due 2026-09-11 --json
 omacal tasks add "Call the bank" --due 2026-09-11 --at 10:00 --list 3 --json
+omacal tasks add "Milk" --list Groceries --json   # a list by name (v4.5+)
 omacal tasks done 41 --json          # and `reopen 41` to put it back
 omacal tasks edit 41 --due 2026-09-14 --json
 omacal tasks edit 41 --due none --json     # clears the date; `--at none` keeps
@@ -165,21 +168,29 @@ When showing the calendar to the user (not piping into a script):
   calendars --json` shows what is hidden.
 - Times are in the user's display zone; trust `start`/`end` for prose and
   `startMs`/`endMs` for arithmetic.
-- Tasks are VTODOs on an iCloud or CalDAV list, or on a list kept on this
+- Tasks are VTODOs on an iCloud or CalDAV list, or on lists kept on this
   machine (v4.1+: Tasks pane → "Create a list on this device", since Google
-  keeps tasks in another product). `omacal tasks` printing nothing can mean
+  keeps tasks in another product; v4.5+: as many as wanted, named, through
+  "New list" in the pane). `omacal tasks` printing nothing can mean
   an account with no task list at all rather than a clear plate — say which
   before congratulating anybody. `due` is a bare date when the task has no
   hour and an instant when it has one — do not invent an hour for one that
   has none. `overdue` is already computed; say a task is late rather than
   working it out from the date. Adding needs a list: omit `--list` and it
-  lands on the first one, which `omacal tasks` names in each row.
+  lands on the first one. `--list` takes an id or an exact name from
+  `omacal tasks lists` — the only place an empty list shows up, since
+  `omacal tasks` names lists beside their tasks. A name matching no list,
+  or two, is refused; ask the user rather than guessing another list.
 - Weather can be stale: `fetched_at` is when the app last reached the
   forecast, and it keeps the last good answer when offline. Check it before
   answering — past about six hours say so ("the forecast is from yesterday
   morning"), and never present an old reading as current.
 - Weather is for `place`, which may not be where the user is: `source`
   `"detected"` (or absent) means it was guessed from the connection's IP
-  and can be a city off; `"configured"` means they set it in the Omarchy
-  bar. Name the place when answering about weather ("In Gurugram, Thursday
+  and can be a city off; `"country"` means the IP told only the country, so
+  `place` is a country and the forecast is for somewhere near its middle —
+  say so, and do not present it as the user's local weather (they can set
+  a city in Settings → Appearance → Weather location); `"settings"` means
+  they set it in OmaCal (v4.5+); `"configured"` means they set it in the
+  Omarchy bar. Name the place when answering about weather ("In Gurugram, Thursday
   looks like rain"). Temperatures are Celsius, unrounded; wind is km/h.
