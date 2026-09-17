@@ -89,3 +89,36 @@ test('agenda feed accepts eight days and rejects invalid or oversized day groups
     expect(JSON.parse(result.stdout).panel.agenda_days[7].events[0].title).toBe('<b>Name</b>');
   } finally { rmSync(dir, {recursive:true, force:true}); }
 });
+
+
+test('older feeds default to agenda and visible-hour bounds reject malformed ranges', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'omacal-visible-hours-'));
+  const path = join(dir, 'feed');
+  const panel = {events: [], label: true, day_start_ms: 0, day_end_ms: 86400000,
+    join_minutes: 5, clocks: {}, hours: []};
+  const read = (fields: Record<string, unknown>) => {
+    writeFileSync(path, JSON.stringify({events: [], panel: {...panel, ...fields}}));
+    return spawnSync('/usr/bin/python3', [helper, path], {timeout: 3000, encoding: 'utf8'});
+  };
+  try {
+    const legacy = read({});
+    expect(legacy.status).toBe(0);
+    expect(JSON.parse(legacy.stdout).panel.day_view).toBe(false);
+    for (const day_view of [false, true]) {
+      const result = read({day_view, visible_start_ms: 5 * 3600000, visible_end_ms: 23 * 3600000});
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout).panel.day_view).toBe(day_view);
+    }
+    for (const fields of [
+      {day_view: null}, {day_view: 0}, {day_view: 'false'},
+      {visible_start_ms: 0}, {visible_end_ms: 86400000},
+      {visible_start_ms: false, visible_end_ms: 86400000},
+      {visible_start_ms: 0, visible_end_ms: '86400000'},
+      {visible_start_ms: 0.5, visible_end_ms: 86400000},
+      {visible_start_ms: -1, visible_end_ms: 86400000},
+      {visible_start_ms: 0, visible_end_ms: 86400001},
+      {visible_start_ms: 3600000, visible_end_ms: 3600000},
+      {visible_start_ms: 7200000, visible_end_ms: 3600000},
+    ]) expect(read({day_view: false, ...fields}).status, JSON.stringify(fields)).not.toBe(0);
+  } finally { rmSync(dir, {recursive: true, force: true}); }
+});

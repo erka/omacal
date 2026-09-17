@@ -475,6 +475,7 @@ pub struct AppSettings {
     /// widget can still opt out on its own side. Off by default: the mark
     /// is what says which app it is at a glance.
     pub show_date: bool,
+    pub menubar_day_view: bool,
     pub menubar_label: bool,
     pub menubar_join_minutes: u32,
     /// The three choices the agenda popups (Omarchy widget, macOS menu bar)
@@ -773,6 +774,7 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
         // The mark unless the row says otherwise, for `list_mode`'s reason:
         // a hand-edited value must land on what the app has always drawn.
         show_date: read(pool, SHOW_DATE_KEY).await.map(|v| v == "1").unwrap_or(false),
+        menubar_day_view: read(pool, "menubar_day_view").await.as_deref() == Some("1"),
         menubar_label: read(pool, "menubar_label").await.as_deref() != Some("0"),
         menubar_join_minutes: read(pool, "menubar_join_minutes").await
             .and_then(|v| v.parse().ok()).filter(|v| *v <= 60).unwrap_or(5),
@@ -1625,12 +1627,29 @@ pub(crate) async fn refresh_menu_surfaces(app: &tauri::AppHandle, state: &AppSta
 pub async fn set_menubar_preferences(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
+    day_view: bool,
     label: bool,
     join_minutes: u32,
 ) -> Result<AppSettings, String> {
-    store_menubar_preferences(&state.pool, label, join_minutes).await?;
+    store_menubar_preferences(&state.pool, day_view, label, join_minutes).await?;
     refresh_menu_surfaces(&app, &state).await;
     Ok(read_settings(&state.pool).await)
+}
+
+/// The popup's own switch must not write label/Join settings from an old feed.
+#[tauri::command]
+pub async fn set_menubar_day_view(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    day_view: bool,
+) -> Result<AppSettings, String> {
+    store_menubar_day_view(&state.pool, day_view).await?;
+    refresh_menu_surfaces(&app, &state).await;
+    Ok(read_settings(&state.pool).await)
+}
+
+async fn store_menubar_day_view(pool: &SqlitePool, day_view: bool) -> Result<(), String> {
+    write(pool, "menubar_day_view", if day_view { "1" } else { "0" }).await.map_err(|e| e.to_string())
 }
 
 /// The agenda popups' three section choices, stored atomically like the
@@ -1664,10 +1683,11 @@ async fn store_menubar_sections(pool: &SqlitePool, earlier: &str, tomorrow: bool
     tx.commit().await.map_err(|e| e.to_string())
 }
 
-async fn store_menubar_preferences(pool: &SqlitePool, label: bool, join_minutes: u32) -> Result<(), String> {
+async fn store_menubar_preferences(pool: &SqlitePool, day_view: bool, label: bool, join_minutes: u32) -> Result<(), String> {
     if join_minutes > 60 { return Err("Choose a Join window from 0 to 60 minutes.".into()); }
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
     for (key, value) in [
+        ("menubar_day_view", if day_view { "1".into() } else { "0".into() }),
         ("menubar_label", if label { "1".into() } else { "0".into() }),
         ("menubar_join_minutes", join_minutes.to_string()),
     ] {
@@ -1942,18 +1962,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn popup_view_changes_preserve_label_and_join_preferences() {
+        let p = pool().await;
+        store_menubar_preferences(&p, false, false, 15).await.unwrap();
+        for day_view in [true, false] {
+            store_menubar_day_view(&p, day_view).await.unwrap();
+            let stored = read_settings(&p).await;
+            assert_eq!(stored.menubar_day_view, day_view);
+            assert!(!stored.menubar_label);
+            assert_eq!(stored.menubar_join_minutes, 15);
+        }
+    }
+
+    #[tokio::test]
     async fn menubar_preferences_persist_and_refuse_invalid_windows_atomically() {
         let p = pool().await;
         let initial = read_settings(&p).await;
+        assert!(!initial.menubar_day_view);
         assert!(initial.menubar_label);
         assert_eq!(initial.menubar_join_minutes, 5);
-        store_menubar_preferences(&p, false, 0).await.unwrap();
+        store_menubar_preferences(&p, true, false, 0).await.unwrap();
         let stored = read_settings(&p).await;
+        assert!(stored.menubar_day_view);
         assert!(!stored.menubar_label);
         assert_eq!(stored.menubar_join_minutes, 0);
-        assert!(store_menubar_preferences(&p, true, 61).await.is_err());
-        assert!(!read_settings(&p).await.menubar_label);
-        store_menubar_preferences(&p, true, 60).await.unwrap();
+        assert!(store_menubar_preferences(&p, false, true, 61).await.is_err());
+        assert!(read_settings(&p).await.menubar_day_view);
+        store_menubar_preferences(&p, false, true, 60).await.unwrap();
         assert_eq!(read_settings(&p).await.menubar_join_minutes, 60);
     }
 

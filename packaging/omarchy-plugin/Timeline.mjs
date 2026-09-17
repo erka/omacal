@@ -13,6 +13,33 @@ export function joinable(events, now, minutes) {
       return aNext ? a.start_ms - b.start_ms : b.start_ms - a.start_ms;
     })[0] || null;
 }
+// Lane packing uses the painted span: a readable minimum-height short event
+// must not cover the next event in its lane. Original times stay on `event`.
+export function layout(events, start, end, minimumDurationMs = 0) {
+  const minimum = Math.min(end - start, Math.max(0, minimumDurationMs));
+  const rows = (events || []).filter(e => !e.all_day && e.start_ms < end && e.end_ms > start)
+    .map(event => {
+      const top = Math.min(Math.max(start, event.start_ms), end - minimum);
+      return { event: event, start: top, end: Math.min(end, Math.max(event.end_ms, top + minimum)), lane: 0, lanes: 1 };
+    })
+    .sort((a, b) => a.start - b.start || a.end - b.end);
+  let cluster = [], ends = [], clusterEnd = -Infinity;
+  function finish() { for (const row of cluster) row.lanes = ends.length; }
+  for (const row of rows) {
+    if (row.start >= clusterEnd) { finish(); cluster = []; ends = []; }
+    let lane = ends.findIndex(end => end <= row.start);
+    if (lane < 0) lane = ends.length;
+    ends[lane] = row.end;
+    row.lane = lane;
+    row.top = (row.start - start) / (end - start);
+    row.height = (row.end - row.start) / (end - start);
+    cluster.push(row);
+    clusterEnd = Math.max(clusterEnd, row.end);
+  }
+  finish();
+  return rows;
+}
+
 // Presentation only: preserve the first calendar's color and never merge
 // unnamed entries or entries with different date spans.
 export function uniqueAllDay(events) {
@@ -129,4 +156,10 @@ export function agendaSections(panel, now, opts) {
     if (sec) out.push(sec);
   }
   return out;
+}
+
+export function visibleRange(day) {
+  const start = day.visible_start_ms, end = day.visible_end_ms;
+  if (Number.isFinite(start) && Number.isFinite(end) && start >= day.day_start_ms && end <= day.day_end_ms && start < end) return { start, end };
+  return { start: day.day_start_ms, end: day.day_end_ms };
 }

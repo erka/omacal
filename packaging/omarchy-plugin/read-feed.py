@@ -62,11 +62,15 @@ def read_feed(path):
             raise ValueError('invalid day clock')
         if not 0 < panel['day_end_ms'] - panel['day_start_ms'] <= 26 * 3600000 or not 0 <= panel['join_minutes'] <= 60:
             raise ValueError('invalid day bounds')
+        if 'visible_start_ms' in panel or 'visible_end_ms' in panel:
+            if not all(type(panel.get(k)) is int for k in ('visible_start_ms', 'visible_end_ms')) or not panel['day_start_ms'] <= panel['visible_start_ms'] < panel['visible_end_ms'] <= panel['day_end_ms']:
+                raise ValueError('invalid visible hours')
         if not isinstance(panel.get('clocks'), dict) or not isinstance(panel.get('hours'), list):
             raise ValueError('invalid clocks')
         if any(abs(panel[k]) >= 8640000000000000 for k in ('day_start_ms', 'day_end_ms')):
             raise ValueError('day out of range')
-        if not all(type(panel.get(k)) is bool for k in ('label',)):
+        panel['day_view'] = panel.get('day_view', False)
+        if not all(type(panel.get(k)) is bool for k in ('day_view', 'label')):
             raise ValueError('invalid preferences')
         if len(panel['hours']) > 26 or not all(type(h) is int and panel['day_start_ms'] <= h < panel['day_end_ms'] for h in panel['hours']):
             raise ValueError('invalid hours')
