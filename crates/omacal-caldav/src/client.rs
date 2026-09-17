@@ -464,19 +464,56 @@ impl CalDavClient {
         ics: &str,
         etag: Option<&str>,
     ) -> Result<Option<String>, CalDavError> {
-        let url = Url::parse(resource_url).map_err(anyhow::Error::from)?;
-        https_or_private(&url).map_err(CalDavError::Other)?;
         let guard: (&str, &str) = match etag {
             Some(t) => ("If-Match", t),
             None => ("If-None-Match", "*"),
         };
+        self.put_with(resource_url, ics, &[guard]).await
+    }
+
+    /// Overwrites a resource that exists but whose etag is not known — the
+    /// row of a server that answered an earlier PUT without one. Neither
+    /// guard fits: `If-None-Match: *` is a create and fails with 412 on
+    /// every such write, and there is no etag to match.
+    pub async fn put_unguarded(&self, resource_url: &str, ics: &str) -> Result<Option<String>, CalDavError> {
+        self.put_with(resource_url, ics, &[]).await
+    }
+
+    async fn put_with(
+        &self,
+        resource_url: &str,
+        ics: &str,
+        guard: &[(&str, &str)],
+    ) -> Result<Option<String>, CalDavError> {
+        let url = Url::parse(resource_url).map_err(anyhow::Error::from)?;
+        https_or_private(&url).map_err(CalDavError::Other)?;
         let (status, _, new_etag) = self
-            .request("PUT", &url, None, "text/calendar; charset=utf-8", ics.to_string(), &[guard])
+            .request("PUT", &url, None, "text/calendar; charset=utf-8", ics.to_string(), guard)
             .await?;
         if !status.is_success() {
             return Err(CalDavError::Http(status));
         }
         Ok(new_etag)
+    }
+
+    /// A resource's current etag, asked with a depth-0 PROPFIND: what a
+    /// write reads back when the server answered its PUT without one, so the
+    /// next write can be guarded again.
+    pub async fn etag_of(&self, resource_url: &str) -> Result<Option<String>, CalDavError> {
+        let url = Url::parse(resource_url).map_err(anyhow::Error::from)?;
+        https_or_private(&url).map_err(CalDavError::Other)?;
+        let body = format!(
+            r#"<?xml version="1.0"?><d:propfind {NS}><d:prop><d:getetag/></d:prop></d:propfind>"#
+        );
+        let xml = self.propfind(&url, "0", body).await?;
+        let Ok(doc) = roxmltree::Document::parse(&xml) else { return Ok(None) };
+        Ok(doc
+            .descendants()
+            .find(|n| n.is_element() && local(n.tag_name()) == "getetag")
+            .and_then(|n| n.text())
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string))
     }
 
     /// Deletes a resource, etag-guarded when one is known.
@@ -1033,6 +1070,30 @@ END:VCALENDAR</c:calendar-data>
             .put(&format!("{}/cals/p/work/old.ics", server.uri()), "x", Some("\"v1\""))
             .await;
         assert!(matches!(conflict, Err(CalDavError::PreconditionFailed)));
+    }
+
+    /// iCloud answers a PUT without an ETag. The etag is asked for, and a
+    /// write whose etag is unknown goes out with no guard at all, never as a
+    /// create.
+    #[tokio::test]
+    async fn an_etag_the_put_did_not_give_is_asked_for_and_unguarded_puts_carry_no_guard() {
+        let server = MockServer::start().await;
+        Mock::given(method("PROPFIND")).and(path("/cals/p/work/t.ics")).and(header("Depth", "0"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(
+                r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response><d:href>/cals/p/work/t.ics</d:href><d:propstat><d:prop><d:getetag>"v7"</d:getetag></d:prop></d:propstat></d:response></d:multistatus>"#,
+            ))
+            .mount(&server).await;
+        Mock::given(method("PUT")).and(path("/cals/p/work/t.ics"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server).await;
+
+        let client = CalDavClient::new(&server.uri(), "u", "p").unwrap();
+        let href = format!("{}/cals/p/work/t.ics", server.uri());
+        assert_eq!(client.etag_of(&href).await.unwrap().as_deref(), Some("\"v7\""));
+        assert_eq!(client.put_unguarded(&href, "x").await.unwrap(), None);
+        let puts = server.received_requests().await.unwrap();
+        let put = puts.iter().find(|r| r.method.as_str() == "PUT").unwrap();
+        assert!(put.headers.get("If-Match").is_none() && put.headers.get("If-None-Match").is_none());
     }
 
     #[tokio::test]

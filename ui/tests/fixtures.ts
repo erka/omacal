@@ -2076,15 +2076,33 @@ export const TASKS: Task[] = [
   // Dated against `APP_NOW` (Mon 29 Jan 2024), so "By when" has an overdue
   // row, a today row and an undated one — the three groups that differ.
   { id: 11, calendarId: 1, summary: 'Buy milk', notes: null, dueMs: null, dueAllDay: true,
-    completed: false, calendar: 'Personal', color: '#5b8def', priority: 0, canWrite: true },
+    completed: false, completedMs: null, calendar: 'Personal', color: '#5b8def', priority: 0, canWrite: true },
   { id: 12, calendarId: 2, summary: 'Ship the release', notes: null,
     dueMs: APP_MON + 12 * H, dueAllDay: true,
-    completed: false, calendar: 'Work', color: '#2dd4bf', priority: 0, canWrite: true },
+    completed: false, completedMs: null, calendar: 'Work', color: '#2dd4bf', priority: 0, canWrite: true },
   { id: 14, calendarId: 2, summary: 'Answer the issue', notes: 'the offline one',
     dueMs: APP_MON - 3 * 24 * H, dueAllDay: true,
-    completed: false, calendar: 'Work', color: '#2dd4bf', priority: 0, canWrite: true },
+    completed: false, completedMs: null, calendar: 'Work', color: '#2dd4bf', priority: 0, canWrite: true },
+  // Done this morning, so the Done list's "today" has something in it.
   { id: 13, calendarId: 2, summary: 'Old standup note', notes: null, dueMs: null, dueAllDay: true,
-    completed: true, calendar: 'Work', color: '#2dd4bf', priority: 0, canWrite: true },
+    completed: true, completedMs: APP_NOW - 3 * H, calendar: 'Work', color: '#2dd4bf', priority: 0, canWrite: true },
+  // Done last week: `list_tasks` still carries a week of them, and the Done
+  // list must not show it as today's.
+  { id: 16, calendarId: 1, summary: 'Renew the passport', notes: null, dueMs: null, dueAllDay: true,
+    completed: true, completedMs: APP_NOW - 4 * 24 * H, calendar: 'Personal', color: '#5b8def', priority: 0, canWrite: true },
+];
+
+/** Done long enough ago that `list_tasks` no longer carries them: only the
+ *  Done list's search (`search_done_tasks`) reaches these. Newest first, as
+ *  the backend orders them — and one titled in Bulgarian, and one found
+ *  only by its note. */
+export const DONE_HISTORY: Task[] = [
+  { id: 21, calendarId: 2, summary: 'Close the Q4 books', notes: 'with the accountant', dueMs: null, dueAllDay: true,
+    completed: true, completedMs: APP_NOW - 20 * 24 * H, calendar: 'Work', color: '#2dd4bf', priority: 0, canWrite: true },
+  { id: 22, calendarId: 1, summary: 'Обади се на банката', notes: null, dueMs: null, dueAllDay: true,
+    completed: true, completedMs: APP_NOW - 40 * 24 * H, calendar: 'Personal', color: '#5b8def', priority: 0, canWrite: true },
+  { id: 23, calendarId: 1, summary: 'Fix the bike', notes: null, dueMs: null, dueAllDay: true,
+    completed: true, completedMs: null, calendar: 'Personal', color: '#5b8def', priority: 0, canWrite: true },
 ];
 
 /** A task due at an hour, which the grid draws among the meetings rather than
@@ -2097,7 +2115,7 @@ export const TASKS: Task[] = [
 export const TIMED_TASK: Task = {
   id: 15, calendarId: 1, summary: 'Call the bank', notes: null,
   dueMs: APP_MON + 11.5 * H, dueAllDay: false,
-  completed: false, calendar: 'Personal', color: '#5b8def', priority: 0, canWrite: true,
+  completed: false, completedMs: null, calendar: 'Personal', color: '#5b8def', priority: 0, canWrite: true,
 };
 
 /** What `plan_ics_import` answers, by the shape a spec asks for: a file

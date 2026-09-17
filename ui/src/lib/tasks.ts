@@ -9,6 +9,9 @@ export type Task = {
   dueMs: number | null;
   dueAllDay: boolean;
   completed: boolean;
+  /** When it was completed, or `null` when the resource does not say — a
+   *  server may set a task's status without stamping the time. */
+  completedMs: number | null;
   calendar: string;
   color: string | null;
   priority: number;
@@ -25,6 +28,15 @@ export type TaskList = {
 };
 
 export const listTasks = () => invoke<Task[]>('list_tasks');
+
+/** A page of completed tasks, newest first: `list_tasks` carries only the
+ *  last week's, and the Done list's "earlier" asks for the rest. */
+export type DonePage = { tasks: Task[]; more: boolean };
+
+/** Completed tasks from before `beforeMs` whose title or note has every
+ *  word of `query`, case folded (an empty query is all of them). */
+export const searchDoneTasks = (query: string, beforeMs: number | null, offset: number, limit: number) =>
+  invoke<DonePage>('search_done_tasks', { query, beforeMs, offset, limit });
 export const taskLists = () => invoke<TaskList[]>('task_lists');
 
 /** Makes the on-this-device list, or finds the one already there, and

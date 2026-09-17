@@ -69,7 +69,9 @@
     /** A task drawn at its hour was dragged to another time: its id and the
      *  instant it now lands on, snapped the way an event's move is. */
     ontaskdue?: ((id: number, dueMs: number) => void) | null;
-    ontasktoggle?: ((id: number, done: boolean) => void) | null;
+    /** A task's checkbox was ticked. Awaited: the box stays disabled until
+     *  the write answers, and unticks again if the task is still open. */
+    ontasktoggle?: ((id: number, done: boolean) => void | Promise<void>) | null;
     /** The sky in a day header was clicked: that day's start and the
      *  glyph's own rect, for App to open the weather card over. Optional —
      *  a grid without it keeps the glyph as the label it always was. */
@@ -842,6 +844,33 @@
     }
     return out;
   });
+
+  /** Tasks whose completion is being written, so a second click cannot send
+   *  a second write racing the first behind the same etag. */
+  let ticking = $state<Set<number>>(new Set());
+
+  /** A checkbox on a task chip, in the row or at its hour.
+   *
+   *  The box is not bound to anything — the chip only exists while the task
+   *  is open — so once the write has answered, a box still on screen belongs
+   *  to a task that is *still open*: the write failed, and the box says so
+   *  by unticking. It used to stay ticked over an open task, and a second
+   *  click to undo sent a second completion (found 2026-09-17). */
+  async function tickTask(chip: TaskChip, box: HTMLInputElement) {
+    if (!ontasktoggle || ticking.has(chip.id)) {
+      box.checked = false;
+      return;
+    }
+    ticking = new Set([...ticking, chip.id]);
+    try {
+      await ontasktoggle(chip.id, true);
+    } finally {
+      const next = new Set(ticking);
+      next.delete(chip.id);
+      ticking = next;
+      box.checked = false;
+    }
+  }
 
   /** A task chip being dragged across the row: which one, from where, and
    *  how many columns the pointer has travelled. */
@@ -1854,9 +1883,9 @@
                 <input
                   type="checkbox"
                   checked={false}
-                  disabled={!chip.canWrite}
+                  disabled={!chip.canWrite || ticking.has(chip.id)}
                   aria-label="Complete {chip.summary}"
-                  onchange={() => ontasktoggle?.(chip.id, true)}
+                  onchange={(e) => void tickTask(chip, e.currentTarget)}
                 />
                 <!-- The title is the grab handle: a button rather than the
                      whole chip, so the checkbox beside it stays its own
@@ -2034,9 +2063,9 @@
           <input
             type="checkbox"
             checked={false}
-            disabled={!chip.canWrite}
+            disabled={!chip.canWrite || ticking.has(chip.id)}
             aria-label="Complete {chip.summary}"
-            onchange={() => ontasktoggle?.(chip.id, true)}
+            onchange={(e) => void tickTask(chip, e.currentTarget)}
           />
           <!-- The title is the grab handle, as in the row. While it moves
                it reads the hour it would land on, the way a dragged block's

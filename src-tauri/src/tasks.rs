@@ -21,6 +21,10 @@ pub struct TaskVm {
     pub due_ms: Option<i64>,
     pub due_all_day: bool,
     pub completed: bool,
+    /// When it was completed, if the resource says. The Done list's "today"
+    /// is a question about this, and a server that set STATUS without
+    /// COMPLETED leaves it empty.
+    pub completed_ms: Option<i64>,
     pub calendar: String,
     pub color: Option<String>,
     pub priority: i64,
@@ -33,15 +37,61 @@ pub struct TaskVm {
 /// notion of "recent enough to still matter".
 const DONE_WINDOW_MS: i64 = 7 * 24 * 3_600_000;
 
+/// The date an all-day due names: its stored midnight read back in the zone
+/// it was resolved in, which is the list's own (`omacal_caldav::resolve`).
+/// Unknown zones read as UTC rather than failing, as `due_for` does.
+pub(crate) fn due_date(due_utc: i64, due_tz: Option<&str>) -> jiff::civil::Date {
+    let tz = due_tz
+        .and_then(|z| jiff::tz::TimeZone::get(z).ok())
+        .unwrap_or(jiff::tz::TimeZone::UTC);
+    jiff::Timestamp::from_millisecond(due_utc)
+        .unwrap_or(jiff::Timestamp::UNIX_EPOCH)
+        .to_zoned(tz)
+        .date()
+}
+
+/// A task's due as the window and the CLI mean it, in `display`.
+///
+/// A timed due is its instant. An **all-day** due is its *date*, at midnight
+/// in the display zone — not the stored instant, which is midnight in the
+/// list's zone. Handing that instant over as it was put a task due Thursday
+/// on a New York list under Wednesday's column in Sofia, and a save sent
+/// Wednesday back to the server: a day lost per edit (found 2026-09-17).
+pub(crate) fn display_due_ms(task: &omacal_store::StoredTask, display: &jiff::tz::TimeZone) -> Option<i64> {
+    let ms = task.due_utc?;
+    if !task.due_all_day {
+        return Some(ms);
+    }
+    let date = due_date(ms, task.due_tz.as_deref());
+    Some(
+        date.to_zoned(display.clone())
+            .map(|z| z.timestamp().as_millisecond())
+            .unwrap_or(ms),
+    )
+}
+
+/// What the store keeps for a due: an instant as itself, a date as midnight
+/// in the list's zone — the shape a sync writes, so an edit and the next
+/// sync store the same row.
+fn stored_due_ms(due: &omacal_caldav::TodoDue, cal_tz: &str) -> Option<i64> {
+    match due {
+        omacal_caldav::TodoDue::At(ts) => Some(ts.as_millisecond()),
+        omacal_caldav::TodoDue::Date(d) => {
+            omacal_caldav::resolve(&omacal_caldav::IcsTime::Date(*d), cal_tz).map(|(ms, _, _)| ms)
+        }
+    }
+}
+
 fn to_vm(row: &omacal_store::TaskRow, demo: bool) -> TaskVm {
     TaskVm {
         id: row.task.id,
         calendar_id: row.task.calendar_id,
         summary: row.task.summary.clone().unwrap_or_else(|| "(untitled)".into()),
         notes: row.task.description.clone(),
-        due_ms: row.task.due_utc,
+        due_ms: display_due_ms(&row.task, &jiff::tz::TimeZone::system()),
         due_all_day: row.task.due_all_day,
         completed: row.task.status == "completed",
+        completed_ms: row.task.completed_utc,
         calendar: row.calendar_summary.clone(),
         color: row.color_hex.clone(),
         priority: row.task.priority,
@@ -124,15 +174,7 @@ async fn set_completed_impl(state: &AppState, id: i64, on: bool) -> anyhow::Resu
         TaskHome::Server(client, _) => {
             let href = task.caldav_href.as_deref()
                 .ok_or_else(|| anyhow::anyhow!("task has no href"))?;
-            client
-                .put(href, &patched, task.etag.as_deref())
-                .await
-                .map_err(|e| match e {
-                    omacal_caldav::CalDavError::PreconditionFailed => {
-                        anyhow::anyhow!(TASK_CHANGED_ON_SERVER)
-                    }
-                    other => anyhow::Error::from(other),
-                })?
+            put_task(client, href, &patched, Written::Existing(task.etag.as_deref())).await?
         }
     };
 
@@ -204,7 +246,7 @@ async fn update_impl(
         .fetch_one(&state.pool)
         .await?;
 
-    let due = due_for(due_ms, due_all_day, &cal_tz)?;
+    let due = due_for(due_ms, due_all_day, &jiff::tz::TimeZone::system())?;
     let now = jiff::Timestamp::from_millisecond(crate::now_ms())?;
     let edit = omacal_caldav::TodoEdit { summary, due, description: notes };
     let patched = omacal_caldav::patch_todo_fields(raw, &task.uid, &edit, &cal_tz, now)
@@ -214,15 +256,7 @@ async fn update_impl(
         TaskHome::Device => None,
         TaskHome::Server(client, _) => {
             let href = task.caldav_href.as_deref().ok_or_else(|| anyhow::anyhow!(TASK_GONE))?;
-            client
-                .put(href, &patched, task.etag.as_deref())
-                .await
-                .map_err(|e| match e {
-                    omacal_caldav::CalDavError::PreconditionFailed => {
-                        anyhow::anyhow!(TASK_CHANGED_ON_SERVER)
-                    }
-                    other => anyhow::Error::from(other),
-                })?
+            put_task(client, href, &patched, Written::Existing(task.etag.as_deref())).await?
         }
     };
 
@@ -231,7 +265,7 @@ async fn update_impl(
         id,
         summary,
         notes,
-        due_ms,
+        due.as_ref().and_then(|d| stored_due_ms(d, &cal_tz)),
         due.is_some().then_some(cal_tz.as_str()),
         due_all_day,
         new_etag.as_deref(),
@@ -243,25 +277,66 @@ async fn update_impl(
     Ok(())
 }
 
+/// Whether a PUT makes a resource or replaces one, and what the row knows.
+pub(crate) enum Written<'a> {
+    New,
+    /// A resource that exists, with the etag the row holds, if any.
+    Existing(Option<&'a str>),
+}
+
+/// PUTs a task's resource and answers with the etag it now has.
+///
+/// iCloud often answers a PUT without an ETag. The task row used to keep
+/// nothing (a create, an edit) or the *old* etag (a completion), and the
+/// second change before the next sync went out as a create or behind a
+/// stale `If-Match` — 412, "that task changed on the server", on a task
+/// nobody else had touched (found 2026-09-17). So an answer without one is
+/// followed by a PROPFIND for it, and a resource whose etag is still unknown
+/// is replaced without a guard rather than created. Asking is best-effort:
+/// the write itself has already succeeded.
+pub(crate) async fn put_task(
+    client: &omacal_caldav::CalDavClient,
+    href: &str,
+    ics: &str,
+    written: Written<'_>,
+) -> anyhow::Result<Option<String>> {
+    let answered = match written {
+        Written::New => client.put(href, ics, None).await,
+        Written::Existing(Some(etag)) => client.put(href, ics, Some(etag)).await,
+        Written::Existing(None) => client.put_unguarded(href, ics).await,
+    }
+    .map_err(|e| match (e, &written) {
+        (omacal_caldav::CalDavError::PreconditionFailed, Written::Existing(_)) => {
+            anyhow::anyhow!(TASK_CHANGED_ON_SERVER)
+        }
+        (other, _) => anyhow::Error::from(other),
+    })?;
+    if answered.is_some() {
+        return Ok(answered);
+    }
+    Ok(client.etag_of(href).await.ok().flatten())
+}
+
 /// The wire's `(ms, all_day)` pair as iCalendar spells it.
 ///
-/// Split out and pure so the one thing worth checking — that an all-day due
-/// takes its date in the *calendar's* zone rather than UTC — is checkable
-/// without a server. In Kolkata a task due at 00:30 local is 19:00 UTC the
-/// day before, and reading the UTC date would file it a day early: the same
-/// class of bug as #44.
+/// Split out and pure so the one thing worth checking — which zone an
+/// all-day due takes its date in — is checkable without a server. It is the
+/// **display** zone: the window and the CLI both send a date as midnight
+/// there, so that is where the instant names the day the user picked.
+/// Reading it in UTC filed a Kolkata task a day early (the class of bug as
+/// #44); reading it in the *list's* zone did the same whenever the two
+/// zones differ, one day per save (found 2026-09-17).
 pub(crate) fn due_for(
     due_ms: Option<i64>,
     all_day: bool,
-    cal_tz: &str,
+    display: &jiff::tz::TimeZone,
 ) -> anyhow::Result<Option<omacal_caldav::TodoDue>> {
     let Some(ms) = due_ms else { return Ok(None) };
     let ts = jiff::Timestamp::from_millisecond(ms)?;
     if !all_day {
         return Ok(Some(omacal_caldav::TodoDue::At(ts)));
     }
-    let tz = jiff::tz::TimeZone::get(cal_tz).unwrap_or(jiff::tz::TimeZone::UTC);
-    Ok(Some(omacal_caldav::TodoDue::Date(ts.to_zoned(tz).date())))
+    Ok(Some(omacal_caldav::TodoDue::Date(ts.to_zoned(display.clone()).date())))
 }
 
 /// The list a task lands on when nobody said: the first one a task can be
@@ -320,6 +395,8 @@ pub(crate) async fn list_body(state: &AppState) -> Vec<TaskVm> {
 
 pub(crate) const TASK_NEEDS_A_TITLE: &str = "a task needs a title";
 pub(crate) const TASK_GONE: &str = "that task is no longer here";
+pub(crate) const NOT_A_TASK_LIST: &str =
+    "that is not a task list you can add to — `omacal tasks` names the lists in each row";
 
 #[tauri::command]
 pub async fn create_task(
@@ -340,6 +417,12 @@ async fn create_impl(
     due_ms: Option<i64>,
     all_day: bool,
 ) -> anyhow::Result<()> {
+    // Only a list the window would offer: the socket names a list by id, and
+    // an id that is an events-only collection, a hidden list or a read-only
+    // one would take a task nobody can see or keep (found 2026-09-17).
+    if !writable_task_lists(&state.pool).await?.iter().any(|l| l.calendar_id == calendar_id) {
+        anyhow::bail!(NOT_A_TASK_LIST);
+    }
     let summary = summary.trim();
     if summary.is_empty() {
         anyhow::bail!(TASK_NEEDS_A_TITLE);
@@ -358,7 +441,8 @@ async fn create_impl(
         let tz = jiff::tz::TimeZone::get(&cal_tz).unwrap_or(jiff::tz::TimeZone::UTC);
         let z = ts.to_zoned(tz);
         if all_day {
-            omacal_caldav::IcsTime::Date(z.date())
+            // The date in the display zone, for `due_for`'s reason.
+            omacal_caldav::IcsTime::Date(ts.to_zoned(jiff::tz::TimeZone::system()).date())
         } else {
             // In the calendar's zone, not as a bare UTC instant (issue
             // #102): `cal_tz` was already being handed to `new_todo_ics`
@@ -375,7 +459,7 @@ async fn create_impl(
         TaskHome::Device => (None, None),
         TaskHome::Server(client, collection_url) => {
             let href = format!("{}/{uid}.ics", collection_url.trim_end_matches('/'));
-            let etag = client.put(&href, &ics, None).await.map_err(anyhow::Error::from)?;
+            let etag = put_task(client, &href, &ics, Written::New).await?;
             (Some(href), etag)
         }
     };
@@ -394,7 +478,10 @@ async fn create_impl(
             description: None,
             due_utc: due.as_ref().map(|(ms, _, _)| *ms),
             due_tz: due.as_ref().map(|(_, tz, _)| tz.clone()),
-            due_all_day: due.is_some(),
+            // Whether the resource says a date or an instant — not whether
+            // there is a due at all, which stored every CLI `--at` on this
+            // device as all-day (found 2026-09-17).
+            due_all_day: due.as_ref().is_some_and(|(_, _, date)| *date),
             status: "needs-action".into(),
             completed_utc: None,
             priority: 0,
@@ -429,6 +516,63 @@ async fn delete_impl(state: &AppState, id: i64) -> anyhow::Result<()> {
     omacal_store::delete_task(&state.pool, id).await?;
     crate::upcoming::refresh_soon(state.pool.clone(), state.demo);
     Ok(())
+}
+
+/// One page of the Done list's history.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DonePage {
+    pub tasks: Vec<TaskVm>,
+    /// Whether another page follows this one.
+    pub more: bool,
+}
+
+/// Whether a task matches what was typed into the Done list's search.
+///
+/// Every word must appear, in the title or the note, in any order and any
+/// case — "bank call" finds "Call the bank". Case is folded by Rust, not by
+/// SQLite, whose `LOWER` knows ASCII only: a list kept in Bulgarian has to
+/// search like one kept in English. An empty query matches everything.
+pub(crate) fn matches_query(summary: &str, notes: Option<&str>, query: &str) -> bool {
+    let hay = format!("{}\n{}", summary, notes.unwrap_or("")).to_lowercase();
+    query.split_whitespace().all(|word| hay.contains(&word.to_lowercase()))
+}
+
+/// Completed tasks older than `before_ms`, newest first, filtered by `query`
+/// and cut into pages — the Done list's "earlier", which the window asks for
+/// only when somebody opens it.
+#[tauri::command]
+pub async fn search_done_tasks(
+    state: tauri::State<'_, AppState>,
+    query: String,
+    before_ms: Option<i64>,
+    offset: usize,
+    limit: usize,
+) -> Result<DonePage, String> {
+    done_page(&state, &query, before_ms, offset, limit)
+        .await
+        .map_err(|e| crate::errors::user_facing(&e))
+}
+
+pub(crate) async fn done_page(
+    state: &AppState,
+    query: &str,
+    before_ms: Option<i64>,
+    offset: usize,
+    limit: usize,
+) -> anyhow::Result<DonePage> {
+    let rows = omacal_store::completed_tasks_for_ui(&state.pool, before_ms).await?;
+    let mut hits = rows.iter().filter(|r| {
+        matches_query(
+            r.task.summary.as_deref().unwrap_or(""),
+            r.task.description.as_deref(),
+            query,
+        )
+    });
+    let limit = limit.clamp(1, 200);
+    let tasks: Vec<TaskVm> = hits.by_ref().skip(offset).take(limit).map(|r| to_vm(r, state.demo)).collect();
+    let more = hits.next().is_some();
+    Ok(DonePage { tasks, more })
 }
 
 /// The task-capable, writable lists the quick-add can land on.
@@ -568,6 +712,122 @@ mod tests {
         assert!(omacal_store::task_by_id(&pool, id).await.unwrap().is_none());
     }
 
+    /// iCloud's shape: PUTs answered without an ETag. Each write reads the
+    /// etag back and the next one is guarded by it; a row that still knows
+    /// none replaces the resource rather than trying to create it again.
+    #[tokio::test]
+    async fn a_server_that_answers_puts_without_an_etag_takes_the_second_change_too() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let etag_is = |e: &str| {
+            ResponseTemplate::new(207).set_body_string(format!(
+                r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response><d:href>/l/t.ics</d:href><d:propstat><d:prop><d:getetag>{e}</d:getetag></d:prop></d:propstat></d:response></d:multistatus>"#
+            ))
+        };
+        Mock::given(method("PROPFIND")).and(path("/l/t.ics")).respond_with(etag_is("\"v1\"")).mount(&server).await;
+        Mock::given(method("PUT")).and(path("/l/t.ics")).and(header("If-None-Match", "*"))
+            .respond_with(ResponseTemplate::new(201)).expect(1).mount(&server).await;
+        Mock::given(method("PUT")).and(path("/l/t.ics")).and(header("If-Match", "\"v1\""))
+            .respond_with(ResponseTemplate::new(204)).expect(1).mount(&server).await;
+        Mock::given(method("PUT")).and(path("/l/t.ics")).respond_with(ResponseTemplate::new(204))
+            .with_priority(10).mount(&server).await;
+
+        let client = omacal_caldav::CalDavClient::new(&server.uri(), "u", "p").unwrap();
+        let href = format!("{}/l/t.ics", server.uri());
+        let created = put_task(&client, &href, "a", Written::New).await.unwrap();
+        assert_eq!(created.as_deref(), Some("\"v1\""), "asked for, since the PUT did not say");
+        let completed = put_task(&client, &href, "b", Written::Existing(created.as_deref())).await.unwrap();
+        assert_eq!(completed.as_deref(), Some("\"v1\""));
+
+        // A row that knows no etag at all: replaced, never re-created.
+        put_task(&client, &href, "c", Written::Existing(None)).await.unwrap();
+        let unguarded = server.received_requests().await.unwrap().into_iter()
+            .filter(|r| r.method.as_str() == "PUT")
+            .filter(|r| r.headers.get("If-Match").is_none() && r.headers.get("If-None-Match").is_none())
+            .count();
+        assert_eq!(unguarded, 1);
+    }
+
+    /// The Done list's search: every word, anywhere, any case — including
+    /// the cases SQLite's `LOWER` would miss.
+    #[test]
+    fn done_search_matches_every_word_in_the_title_or_the_note_in_any_case() {
+        assert!(matches_query("Call the bank", None, ""), "an empty search is everything");
+        assert!(matches_query("Call the bank", None, "  "), "and so is a blank one");
+        assert!(matches_query("Call the bank", None, "BANK call"), "any order, any case");
+        assert!(matches_query("Pay rent", Some("to the landlord"), "rent landlord"), "the note counts");
+        assert!(!matches_query("Call the bank", None, "bank rent"), "every word, not any word");
+        // Cyrillic: `LOWER('Обади')` in SQLite is still 'Обади'.
+        assert!(matches_query("Обади се на банката", None, "БАНКАТА"));
+        assert!(matches_query("Élise's birthday", None, "élise"));
+    }
+
+    /// Earlier done tasks come in pages, newest first, never repeating what
+    /// the window already shows as today's.
+    #[tokio::test]
+    async fn done_pages_are_newest_first_filtered_and_say_whether_more_follow() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        let list =
+            omacal_store::ensure_local_task_list(&pool, LOCAL_TASK_LIST_NAME, "UTC", 0).await.unwrap();
+        let state = local_state(pool.clone());
+        for title in ["Pay rent", "Call the bank", "Book flights", "Call mum", "Today's one"] {
+            create_impl(&state, list, title, None, true).await.unwrap();
+        }
+        // Completed a day apart, in the order created; the last one "today".
+        let rows = omacal_store::tasks_for_ui(&pool, 0).await.unwrap();
+        for r in &rows {
+            let day = match r.task.summary.as_deref() {
+                Some("Pay rent") => 1,
+                Some("Call the bank") => 2,
+                Some("Book flights") => 3,
+                Some("Call mum") => 4,
+                _ => 10,
+            };
+            omacal_store::mark_task_status(&pool, r.task.id, "completed", Some(day * 86_400_000), None, None, 0)
+                .await
+                .unwrap();
+        }
+        let today = 10 * 86_400_000;
+        let titles = |p: &DonePage| p.tasks.iter().map(|t| t.summary.clone()).collect::<Vec<_>>();
+
+        let first = done_page(&state, "", Some(today), 0, 3).await.unwrap();
+        assert_eq!(titles(&first), vec!["Call mum", "Book flights", "Call the bank"]);
+        assert!(first.more);
+        assert!(first.tasks.iter().all(|t| t.completed && t.completed_ms.is_some()));
+        let second = done_page(&state, "", Some(today), 3, 3).await.unwrap();
+        assert_eq!(titles(&second), vec!["Pay rent"]);
+        assert!(!second.more, "the last page says so");
+
+        let calls = done_page(&state, "call", Some(today), 0, 10).await.unwrap();
+        assert_eq!(titles(&calls), vec!["Call mum", "Call the bank"]);
+        assert!(!calls.more);
+        let everything = done_page(&state, "", None, 0, 10).await.unwrap();
+        assert_eq!(everything.tasks.len(), 5, "no cutoff includes today's");
+    }
+
+    /// A task goes only where the window would offer to put it.
+    #[tokio::test]
+    async fn a_task_is_refused_on_a_list_that_is_not_one() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        let list = omacal_store::ensure_local_task_list(&pool, LOCAL_TASK_LIST_NAME, "UTC", 0).await.unwrap();
+        let state = local_state(pool.clone());
+        let refused = |e: anyhow::Error| e.to_string() == NOT_A_TASK_LIST;
+
+        assert!(create_impl(&state, 9_999, "Nowhere", None, true).await.is_err_and(refused), "no such list");
+        for (setting, undo) in [
+            ("UPDATE calendars SET supports_tasks = 0 WHERE id = ?1", "UPDATE calendars SET supports_tasks = 1 WHERE id = ?1"),
+            ("UPDATE calendars SET selected = 0 WHERE id = ?1", "UPDATE calendars SET selected = 1 WHERE id = ?1"),
+            ("UPDATE calendars SET access_role = 'reader' WHERE id = ?1", "UPDATE calendars SET access_role = 'owner' WHERE id = ?1"),
+        ] {
+            sqlx::query(setting).bind(list).execute(&pool).await.unwrap();
+            assert!(create_impl(&state, list, "Hidden", None, true).await.is_err_and(refused), "{setting}");
+            sqlx::query(undo).bind(list).execute(&pool).await.unwrap();
+        }
+        assert!(omacal_store::tasks_for_ui(&pool, 0).await.unwrap().is_empty(), "nothing was written");
+        create_impl(&state, list, "Here", None, true).await.unwrap();
+    }
+
     /// The list is offered to the pickers, and making it twice makes one.
     #[tokio::test]
     async fn the_on_device_list_is_offered_once_however_often_it_is_asked_for() {
@@ -585,32 +845,77 @@ mod tests {
         assert!(omacal_store::is_local_calendar(&pool, first).await.unwrap());
     }
 
-    /// An all-day due date takes its date in the **calendar's** zone.
+    /// An all-day due date takes its date in the **display** zone, where the
+    /// window and the CLI put its midnight.
     ///
-    /// The case that matters is the one that bit #44: in Kolkata a task due
-    /// at 00:30 local is 19:00 UTC the day before, so reading the UTC date
-    /// would file it a day early. A timed due is the instant itself and has
-    /// no such question.
+    /// The case that bit #44 still holds: in Kolkata a task due at 00:30
+    /// local is 19:00 UTC the day before, so reading the UTC date would file
+    /// it a day early. A timed due is the instant itself and has no such
+    /// question.
     #[test]
-    fn an_all_day_due_takes_the_calendars_own_date() {
+    fn an_all_day_due_takes_its_date_in_the_display_zone() {
         // 2026-09-11T00:30 in Asia/Kolkata is 2026-09-10T19:00Z.
         let ms: i64 = "2026-09-10T19:00:00Z".parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        let zone = |z: &str| jiff::tz::TimeZone::get(z).unwrap();
 
-        let kolkata = due_for(Some(ms), true, "Asia/Kolkata").unwrap();
+        let kolkata = due_for(Some(ms), true, &zone("Asia/Kolkata")).unwrap();
         assert_eq!(kolkata, Some(omacal_caldav::TodoDue::Date(jiff::civil::date(2026, 9, 11))));
-        let utc = due_for(Some(ms), true, "UTC").unwrap();
+        let utc = due_for(Some(ms), true, &jiff::tz::TimeZone::UTC).unwrap();
         assert_eq!(utc, Some(omacal_caldav::TodoDue::Date(jiff::civil::date(2026, 9, 10))));
 
-        // A timed due is the instant, whatever the calendar's zone.
-        let at = due_for(Some(ms), false, "Asia/Kolkata").unwrap();
+        // A timed due is the instant, whatever the zone.
+        let at = due_for(Some(ms), false, &zone("Asia/Kolkata")).unwrap();
         assert_eq!(at, Some(omacal_caldav::TodoDue::At(jiff::Timestamp::from_millisecond(ms).unwrap())));
 
         // No date is no date, not an instant at zero.
-        assert_eq!(due_for(None, true, "Asia/Kolkata").unwrap(), None);
-        assert_eq!(due_for(None, false, "UTC").unwrap(), None);
+        assert_eq!(due_for(None, true, &zone("Asia/Kolkata")).unwrap(), None);
+        assert_eq!(due_for(None, false, &jiff::tz::TimeZone::UTC).unwrap(), None);
+    }
 
-        // A zone the machine does not know falls back rather than refusing:
-        // a task filed on the wrong day beats a task that cannot be saved.
-        assert!(due_for(Some(ms), true, "Mars/Olympus").unwrap().is_some());
+    /// The audit's scenario, both ways round: the display zone and the
+    /// list's zone differ, and an all-day due must name the same date read
+    /// back, and written back, however often it is saved.
+    #[test]
+    fn an_all_day_due_keeps_its_date_across_differing_zones() {
+        let zone = |z: &str| jiff::tz::TimeZone::get(z).unwrap();
+        for (display, list) in [("Europe/Sofia", "America/New_York"), ("America/New_York", "Europe/Sofia")] {
+            let thursday = jiff::civil::date(2026, 9, 17);
+            // What a sync stores for `DUE;VALUE=DATE:20260917` on that list.
+            let (stored, tz, _) =
+                omacal_caldav::resolve(&omacal_caldav::IcsTime::Date(thursday), list).unwrap();
+            let mut task = omacal_store::StoredTask {
+                id: 1, calendar_id: 1, uid: "u".into(), etag: None, caldav_href: None,
+                summary: Some("x".into()), description: None, due_utc: Some(stored),
+                due_tz: Some(tz), due_all_day: true, status: "needs-action".into(),
+                completed_utc: None, priority: 0, updated_at: 0, raw_ics: None,
+            };
+            for round in 0..3 {
+                // What the window is handed: Thursday's midnight where it is.
+                let shown = display_due_ms(&task, &zone(display)).unwrap();
+                let midnight = thursday.to_zoned(zone(display)).unwrap().timestamp().as_millisecond();
+                assert_eq!(shown, midnight, "{display} over a {list} list, round {round}: shown");
+                // And what a save of that, unchanged, sends and stores.
+                let due = due_for(Some(shown), true, &zone(display)).unwrap().unwrap();
+                assert_eq!(due, omacal_caldav::TodoDue::Date(thursday), "{display} over {list}, round {round}: written");
+                task.due_utc = stored_due_ms(&due, list);
+            }
+            assert_eq!(task.due_utc, Some(stored), "a save stores what a sync would");
+        }
+    }
+
+    /// Found 2026-09-17: a timed due created on this device came back all-day.
+    #[tokio::test]
+    async fn a_timed_task_created_on_this_device_keeps_its_hour() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        let list = omacal_store::ensure_local_task_list(&pool, LOCAL_TASK_LIST_NAME, "Europe/Sofia", 0)
+            .await
+            .unwrap();
+        let state = local_state(pool.clone());
+        let at: i64 = "2026-09-18T07:00:00Z".parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        create_impl(&state, list, "Call the bank", Some(at), false).await.unwrap();
+        let row = &omacal_store::tasks_for_ui(&pool, 0).await.unwrap()[0].task;
+        assert!(!row.due_all_day, "an hour was given, so it is not all-day");
+        assert_eq!(row.due_utc, Some(at));
+        assert!(row.raw_ics.as_deref().is_some_and(|r| r.contains("DUE;TZID=Europe/Sofia:20260918T100000")));
     }
 }

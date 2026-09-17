@@ -543,10 +543,34 @@ fn fmt_utc(ts: Timestamp) -> String {
     )
 }
 
-/// Rewrites the VTODO with `uid` inside `raw` to completed / reopened,
-/// touching nothing else in the resource. Physical-line surgery on purpose:
-/// re-serializing the parse tree would normalize every line and lose
-/// vendor extensions this module does not model.
+/// One content line as the resource spells it: the unfolded text a decision
+/// reads, and the physical lines it arrived as.
+struct Logical {
+    text: String,
+    physical: Vec<String>,
+}
+
+/// `raw` as content lines, RFC 5545 folding undone for reading but kept for
+/// writing back. A line that begins with a space or a tab continues the one
+/// before it; blank lines are dropped, as `unfold` drops them.
+fn logical_lines(raw: &str) -> Vec<Logical> {
+    let mut out: Vec<Logical> = Vec::new();
+    for raw_line in raw.split('\n') {
+        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        if let Some(rest) = line.strip_prefix(' ').or_else(|| line.strip_prefix('\t')) {
+            if let Some(last) = out.last_mut() {
+                last.text.push_str(rest);
+                last.physical.push(line.to_string());
+                continue;
+            }
+        }
+        if !line.is_empty() {
+            out.push(Logical { text: line.to_string(), physical: vec![line.to_string()] });
+        }
+    }
+    out
+}
+
 /// Rewrites the one VTODO in `raw` whose UID matches, leaving every other
 /// component and every line this does not name exactly as it found them.
 ///
@@ -554,48 +578,91 @@ fn fmt_utc(ts: Timestamp) -> String {
 /// side works this way: a resource carries properties omacal does not model
 /// — categories, RELATED-TO, an organiser's X- lines, another client's
 /// alarms — and a round trip through our own struct would drop every one of
-/// them. `rewrite` is handed the matching VTODO's lines, without its BEGIN
-/// and END, and returns the lines to put back.
+/// them.
+///
+/// `rewrite` is handed the VTODO's **own** properties, unfolded, and returns
+/// the properties to put back. Two things about that are load-bearing
+/// (found 2026-09-17 by an audit, and reproduced):
+///
+/// - **Unfolded.** Servers fold long lines. Deciding on physical lines
+///   dropped a folded DESCRIPTION's first line and kept its continuation,
+///   which then joined the property above it — a task's UID read back as
+///   `abcd tempor incididunt`. A property kept unchanged goes back as the
+///   physical lines it came in as.
+/// - **Own.** A nested VALARM has its own DESCRIPTION, and a filter reading
+///   every line of the block removed Apple's `DESCRIPTION:Reminder` from the
+///   alarm. Nested components pass through whole, after the properties,
+///   which is also the order RFC 5545 requires.
 fn patch_todo<F>(raw: &str, uid: &str, rewrite: F) -> Option<String>
 where
     F: Fn(&[String]) -> Vec<String>,
 {
+    let lines = logical_lines(raw);
     let mut out: Vec<String> = Vec::new();
-    let mut block: Vec<String> = Vec::new();
-    let mut in_todo = false;
     let mut touched = false;
-    for raw_line in raw.split('\n') {
-        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
-        if line.eq_ignore_ascii_case("BEGIN:VTODO") {
-            in_todo = true;
-            block.clear();
-            block.push(line.to_string());
+    let mut i = 0;
+    while i < lines.len() {
+        if !lines[i].text.eq_ignore_ascii_case("BEGIN:VTODO") {
+            out.extend(lines[i].physical.iter().cloned());
+            i += 1;
             continue;
         }
-        if !in_todo {
-            out.push(line.to_string());
-            continue;
-        }
-        if line.eq_ignore_ascii_case("END:VTODO") {
-            block.push(line.to_string());
-            let joined = block.join("\n");
-            let this_uid = parse(&format!("BEGIN:VCALENDAR\n{joined}\nEND:VCALENDAR")).and_then(|r| {
-                r.components("VTODO").next().and_then(|t| t.prop_value("UID").map(|u| u.trim().to_string()))
-            });
-            if this_uid.as_deref() == Some(uid) {
-                touched = true;
-                let inner = &block[1..block.len() - 1];
-                out.push(block[0].clone());
-                out.extend(rewrite(inner));
-                out.push(block[block.len() - 1].clone());
-            } else {
-                out.extend(block.iter().cloned());
+        // The VTODO's extent, its own properties and its nested components.
+        let begin = i;
+        let mut depth = 0usize;
+        let mut own: Vec<usize> = Vec::new();
+        let mut nested: Vec<usize> = Vec::new();
+        let mut end = None;
+        let mut j = i + 1;
+        while j < lines.len() {
+            let u = lines[j].text.to_ascii_uppercase();
+            if depth == 0 && u == "END:VTODO" {
+                end = Some(j);
+                break;
             }
-            in_todo = false;
-            block.clear();
-            continue;
+            if u.starts_with("BEGIN:") {
+                depth += 1;
+            }
+            if depth > 0 {
+                nested.push(j);
+            } else {
+                own.push(j);
+            }
+            if u.starts_with("END:") && depth > 0 {
+                depth -= 1;
+            }
+            j += 1;
         }
-        block.push(line.to_string());
+        let Some(end) = end else {
+            // An unterminated VTODO is not something to guess at.
+            out.extend(lines[begin..].iter().flat_map(|l| l.physical.iter().cloned()));
+            break;
+        };
+        let block: Vec<&str> = lines[begin..=end].iter().map(|l| l.text.as_str()).collect();
+        let this_uid = parse(&format!("BEGIN:VCALENDAR\n{}\nEND:VCALENDAR", block.join("\n")))
+            .and_then(|r| r.components("VTODO").next().and_then(|t| t.prop_value("UID").map(|u| u.trim().to_string())));
+        if this_uid.as_deref() == Some(uid) {
+            touched = true;
+            let texts: Vec<String> = own.iter().map(|&k| lines[k].text.clone()).collect();
+            // A property handed back unchanged keeps the folding it came with.
+            let mut spelled: std::collections::HashMap<&str, std::collections::VecDeque<&[String]>> =
+                std::collections::HashMap::new();
+            for &k in &own {
+                spelled.entry(lines[k].text.as_str()).or_default().push_back(&lines[k].physical);
+            }
+            out.extend(lines[begin].physical.iter().cloned());
+            for line in rewrite(&texts) {
+                match spelled.get_mut(line.as_str()).and_then(|q| q.pop_front()) {
+                    Some(physical) => out.extend(physical.iter().cloned()),
+                    None => out.push(line),
+                }
+            }
+            out.extend(nested.iter().flat_map(|&k| lines[k].physical.iter().cloned()));
+            out.extend(lines[end].physical.iter().cloned());
+        } else {
+            out.extend(lines[begin..=end].iter().flat_map(|l| l.physical.iter().cloned()));
+        }
+        i = end + 1;
     }
     // A resource that never held this UID is not something to write back.
     (touched && !out.is_empty()).then(|| out.join("\r\n"))
@@ -748,11 +815,8 @@ pub fn patch_todo_fields(raw: &str, uid: &str, edit: &TodoEdit, cal_tz: &str, no
             .iter()
             .filter(|l| {
                 let u = l.to_ascii_uppercase();
-                // A continuation line (RFC 5545 folding) belongs to whichever
-                // property it follows; these are all short enough that omacal
-                // never writes one, but a server's copy may have folded the
-                // description we are replacing, so unfolded input is the
-                // contract — `parse` unfolds before anything reaches here.
+                // Unfolded, and the VTODO's own lines only: `patch_todo`
+                // hands over no continuation lines and nothing of a VALARM.
                 !(u.starts_with("SUMMARY:")
                     || u.starts_with("SUMMARY;")
                     || u.starts_with("DUE:")
@@ -783,83 +847,46 @@ pub fn patch_todo_fields(raw: &str, uid: &str, edit: &TodoEdit, cal_tz: &str, no
     })
 }
 
+/// Completes or reopens the task with this UID, touching nothing else in the
+/// resource — [`patch_todo`]'s surgery, on the status properties alone.
 pub fn patch_todo_status(raw: &str, uid: &str, completed: bool, now: Timestamp) -> Option<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut block: Vec<String> = Vec::new();
-    let mut in_todo = false;
-    for raw_line in raw.split('\n') {
-        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
-        if line.eq_ignore_ascii_case("BEGIN:VTODO") {
-            in_todo = true;
-            block.clear();
-            block.push(line.to_string());
-            continue;
+    patch_todo(raw, uid, |own| {
+        let sequence = own
+            .iter()
+            .find(|l| l.to_ascii_uppercase().starts_with("SEQUENCE:"))
+            .and_then(|l| l.split_once(':'))
+            .and_then(|(_, v)| v.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+        let mut kept: Vec<String> = own
+            .iter()
+            .filter(|l| {
+                let u = l.to_ascii_uppercase();
+                !(u.starts_with("STATUS:")
+                    || u.starts_with("STATUS;")
+                    || u.starts_with("COMPLETED:")
+                    || u.starts_with("COMPLETED;")
+                    || u.starts_with("PERCENT-COMPLETE:")
+                    || u.starts_with("PERCENT-COMPLETE;")
+                    || u.starts_with("SEQUENCE:")
+                    || u.starts_with("DTSTAMP:")
+                    || u.starts_with("LAST-MODIFIED:"))
+            })
+            .cloned()
+            .collect();
+        // iCloudBridge compares modification times, so a status-only change
+        // needs the same revision stamps as a title/date edit.
+        kept.push(format!("SEQUENCE:{}", sequence + 1));
+        kept.push(format!("DTSTAMP:{}", fmt_utc(now)));
+        kept.push(format!("LAST-MODIFIED:{}", fmt_utc(now)));
+        if completed {
+            kept.push("STATUS:COMPLETED".to_string());
+            kept.push(format!("COMPLETED:{}", fmt_utc(now)));
+            kept.push("PERCENT-COMPLETE:100".to_string());
+        } else {
+            kept.push("STATUS:NEEDS-ACTION".to_string());
         }
-        if !in_todo {
-            out.push(line.to_string());
-            continue;
-        }
-        if line.eq_ignore_ascii_case("END:VTODO") {
-            block.push(line.to_string());
-            // Only the matching UID gets patched; other VTODOs pass through.
-            let joined = block.join("\n");
-            let this_uid = parse(&format!("BEGIN:VCALENDAR\n{joined}\nEND:VCALENDAR"))
-                .and_then(|r| r.components("VTODO").next().and_then(|t| t.prop_value("UID").map(|u| u.trim().to_string())));
-            if this_uid.as_deref() == Some(uid) {
-                let sequence = block.iter()
-                    .find(|l| l.to_ascii_uppercase().starts_with("SEQUENCE:"))
-                    .and_then(|l| l.split_once(':'))
-                    .and_then(|(_, v)| v.trim().parse::<i64>().ok())
-                    .unwrap_or(0);
-                let mut patched: Vec<String> = block
-                    .iter()
-                    .filter(|l| {
-                        let u = l.to_ascii_uppercase();
-                        !(u.starts_with("STATUS")
-                            || u.starts_with("COMPLETED:")
-                            || u.starts_with("COMPLETED;")
-                            || u.starts_with("PERCENT-COMPLETE")
-                            || u.starts_with("SEQUENCE:")
-                            || u.starts_with("DTSTAMP:")
-                            || u.starts_with("LAST-MODIFIED:"))
-                    })
-                    .cloned()
-                    .collect();
-                // iCloudBridge compares modification times, so a status-only
-                // change needs the same revision stamps as a title/date edit.
-                let insert_at = patched.len() - 1; // before END:VTODO
-                patched.splice(insert_at..insert_at, [
-                    format!("SEQUENCE:{}", sequence + 1),
-                    format!("DTSTAMP:{}", fmt_utc(now)),
-                    format!("LAST-MODIFIED:{}", fmt_utc(now)),
-                ]);
-                let insert_at = patched.len() - 1;
-                if completed {
-                    patched.splice(
-                        insert_at..insert_at,
-                        [
-                            "STATUS:COMPLETED".to_string(),
-                            format!("COMPLETED:{}", fmt_utc(now)),
-                            "PERCENT-COMPLETE:100".to_string(),
-                        ],
-                    );
-                } else {
-                    patched.splice(insert_at..insert_at, ["STATUS:NEEDS-ACTION".to_string()]);
-                }
-                out.extend(patched);
-            } else {
-                out.extend(block.iter().cloned());
-            }
-            in_todo = false;
-            block.clear();
-            continue;
-        }
-        block.push(line.to_string());
-    }
-    if out.is_empty() {
-        return None;
-    }
-    Some(out.join("\r\n"))
+        kept
+    })
 }
 
 /// A brand-new single-VTODO resource.
@@ -2100,6 +2127,55 @@ END:VEVENT\r\nEND:VCALENDAR";
         assert!(out.contains("ATTENDEE;CN=Ada;PARTSTAT=ACCEPTED:mailto:ada@example.com"), "{out}");
         assert!(out.contains("SUMMARY:Standup (moved again)"), "{out}");
         assert_eq!(out.matches("BEGIN:VEVENT").count(), 2, "still one master and one exception: {out}");
+    }
+
+    /// A server's copy: a DESCRIPTION folded across three physical lines
+    /// *before* the UID, and an Apple alarm with a DESCRIPTION of its own.
+    const FOLDED: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VTODO\r\nDTSTAMP:20260901T000000Z\r\nDESCRIPTION:Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusm\r\n od tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim ve\r\n niam, quis nostrud\r\nUID:abc\r\nSUMMARY:Pay rent\r\nX-APPLE-SORT-ORDER:7\r\nSEQUENCE:3\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:Reminder\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
+
+    fn read_back(raw: &str) -> (CalTodo, Component) {
+        let root = parse(raw).expect("the patched resource still parses");
+        let todo = todos_in(&root).into_iter().next().expect("one VTODO");
+        let t = root.components("VTODO").next().unwrap().clone();
+        (todo, t)
+    }
+
+    /// Found 2026-09-17 by an audit and reproduced: a folded property's
+    /// continuation lines outlived the property they belonged to and joined
+    /// the line above, and the alarm lost its text.
+    #[test]
+    fn editing_a_folded_task_keeps_its_uid_its_alarm_and_the_rfc_order() {
+        let now = Timestamp::from_millisecond(1_790_000_000_000).unwrap();
+        let edit = TodoEdit { summary: "Pay the rent", due: None, description: Some("to the landlord") };
+        let out = patch_todo_fields(FOLDED, "abc", &edit, "Europe/Sofia", now).unwrap();
+        let (todo, vtodo) = read_back(&out);
+        assert_eq!(todo.uid, "abc", "no continuation line joined the UID");
+        assert_eq!(todo.summary.as_deref(), Some("Pay the rent"));
+        assert_eq!(todo.description.as_deref(), Some("to the landlord"));
+        assert!(!out.contains(" od tempor") && !out.contains(" niam, quis"), "the old folds went with it");
+        let alarm = vtodo.components("VALARM").next().expect("the alarm survives");
+        assert_eq!(alarm.prop_value("DESCRIPTION"), Some("Reminder"), "the alarm keeps its own text");
+        assert_eq!(vtodo.prop_value("X-APPLE-SORT-ORDER"), Some("7"), "what omacal does not model stays");
+        assert_eq!(vtodo.prop_value("SEQUENCE"), Some("4"));
+        // Properties first, then the alarm: RFC 5545's `todoc`.
+        let summary_at = out.find("SUMMARY:Pay the rent").unwrap();
+        assert!(summary_at < out.find("BEGIN:VALARM").unwrap(), "no property after the alarm");
+    }
+
+    #[test]
+    fn completing_a_folded_task_keeps_its_uid_its_note_and_its_alarm() {
+        let now = Timestamp::from_millisecond(1_790_000_000_000).unwrap();
+        let out = patch_todo_status(FOLDED, "abc", true, now).unwrap();
+        let (todo, vtodo) = read_back(&out);
+        assert_eq!(todo.uid, "abc");
+        assert_eq!(todo.status.to_ascii_uppercase(), "COMPLETED");
+        // Untouched, so it goes back folded exactly as the server folded it.
+        assert!(out.contains("DESCRIPTION:Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusm\r\n od tempor"));
+        assert!(todo.description.as_deref().is_some_and(|d| d.ends_with("quis nostrud")));
+        assert_eq!(vtodo.components("VALARM").next().unwrap().prop_value("DESCRIPTION"), Some("Reminder"));
+        assert!(out.find("STATUS:COMPLETED").unwrap() < out.find("BEGIN:VALARM").unwrap());
+        // And a resource that never held the UID is not written back at all.
+        assert_eq!(patch_todo_status(FOLDED, "nobody", true, now), None);
     }
 
     #[test]

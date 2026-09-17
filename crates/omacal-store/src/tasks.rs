@@ -169,6 +169,46 @@ pub async fn tasks_for_ui(pool: &SqlitePool, done_since_ms: i64) -> anyhow::Resu
         .collect())
 }
 
+/// Completed tasks from selected lists, newest completion first — the
+/// Done list's history, past the week `tasks_for_ui` carries.
+///
+/// `before_ms` leaves out what was completed at or after it (the window
+/// passes its own midnight, so "earlier" never repeats "today"). A completed
+/// task with no completion stamp — a server that set STATUS without
+/// COMPLETED — cannot be dated, so it is never "today" and sorts last.
+/// Unfiltered by text: SQLite's `LOWER` folds ASCII only, and a list kept in
+/// Bulgarian must search the same as one kept in English, so the caller
+/// matches in Rust.
+pub async fn completed_tasks_for_ui(
+    pool: &SqlitePool,
+    before_ms: Option<i64>,
+) -> anyhow::Result<Vec<TaskRow>> {
+    let sql = format!(
+        "SELECT {COLS}, COALESCE(c.label_override, c.summary) AS cal_summary,
+                COALESCE(c.color_override, c.color_hex) AS cal_color,
+                c.access_role AS cal_role
+         FROM tasks t
+         JOIN calendars c ON c.id = t.calendar_id
+         WHERE c.selected = 1
+           AND t.status = 'completed'
+           AND (?1 IS NULL OR t.completed_utc IS NULL OR t.completed_utc < ?1)
+         ORDER BY
+           CASE WHEN t.completed_utc IS NULL THEN 1 ELSE 0 END,
+           t.completed_utc DESC,
+           t.summary"
+    );
+    let rows = sqlx::query(&sql).bind(before_ms).fetch_all(pool).await?;
+    Ok(rows
+        .iter()
+        .map(|row| TaskRow {
+            task: row_to_task(row),
+            calendar_summary: row.get("cal_summary"),
+            color_hex: row.get("cal_color"),
+            access_role: row.get("cal_role"),
+        })
+        .collect())
+}
+
 /// One task by id, for the write path.
 pub async fn task_by_id(pool: &SqlitePool, id: i64) -> anyhow::Result<Option<StoredTask>> {
     let sql = format!("SELECT {COLS} FROM tasks t WHERE t.id = ?1");
@@ -182,6 +222,10 @@ pub async fn task_by_id(pool: &SqlitePool, id: i64) -> anyhow::Result<Option<Sto
 /// The optimistic local half of completing (or reopening) a task: the server
 /// write happens first, then this records what the server now holds without
 /// waiting for the next sync to say so.
+///
+/// The etag is written as given, `None` included: after a write the old one
+/// no longer names the resource, and keeping it guarded the next write with
+/// a precondition the server was bound to refuse.
 pub async fn mark_task_status(
     pool: &SqlitePool,
     id: i64,
@@ -193,7 +237,7 @@ pub async fn mark_task_status(
 ) -> anyhow::Result<()> {
     sqlx::query(
         "UPDATE tasks SET status = ?2, completed_utc = ?3,
-            etag = COALESCE(?4, etag), raw_ics = COALESCE(?5, raw_ics),
+            etag = ?4, raw_ics = COALESCE(?5, raw_ics),
             updated_at = ?6
          WHERE id = ?1",
     )
@@ -368,6 +412,41 @@ mod tests {
         let rows = tasks_for_ui(&pool, 5_000).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].task.uid, "recent");
+    }
+
+    #[tokio::test]
+    async fn completed_history_is_newest_first_before_the_cutoff_and_undated_last() {
+        let (pool, _) = seeded().await;
+        let done = |uid: &str, at: Option<i64>| {
+            let mut t = task(uid, None);
+            t.status = "completed".into();
+            t.completed_utc = at;
+            t
+        };
+        for t in [
+            done("monday", Some(1_000)),
+            done("wednesday", Some(3_000)),
+            done("today", Some(9_000)),
+            done("undated", None),
+            task("open", None),
+        ] {
+            upsert_task(&pool, &t).await.unwrap();
+        }
+
+        let all: Vec<String> = completed_tasks_for_ui(&pool, None).await.unwrap()
+            .into_iter().map(|r| r.task.uid).collect();
+        assert_eq!(all, vec!["today", "wednesday", "monday", "undated"], "an open task never shows");
+
+        // The window's midnight: today's completion is the Done list's own,
+        // and must not come back as "earlier". The undated one has no day,
+        // so it is always earlier.
+        let earlier: Vec<String> = completed_tasks_for_ui(&pool, Some(9_000)).await.unwrap()
+            .into_iter().map(|r| r.task.uid).collect();
+        assert_eq!(earlier, vec!["wednesday", "monday", "undated"]);
+
+        sqlx::query("UPDATE calendars SET selected = 0 WHERE id = 1")
+            .execute(&pool).await.unwrap();
+        assert!(completed_tasks_for_ui(&pool, None).await.unwrap().is_empty(), "a hidden list's history is hidden too");
     }
 
     #[tokio::test]

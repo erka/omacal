@@ -418,6 +418,77 @@ const CARD_OFFICE: &str = "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:e2e-office\r\nFN:Fr
 /// **#126 against a real server**: discovery finds the address book, the
 /// query brings the cards themselves back, and what reaches the store is one
 /// row per address — with the card that names nobody to invite left out.
+/// A server task with a long, folded note and an alarm of its own —
+/// Apple's shape — as an audit reproduced the corruption with (2026-09-17).
+const FOLDED_TODO: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//e2e//EN\r\nBEGIN:VTODO\r\nDTSTAMP:20260901T000000Z\r\nDESCRIPTION:Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusm\r\n od tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim ve\r\n niam, quis nostrud\r\nUID:e2e-folded\r\nSUMMARY:Pay rent\r\nDUE;VALUE=DATE:20260918\r\nX-KEEP-ME:vendor line\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:Reminder\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
+
+/// A task's life on a real server, the way the commands write it: an edit,
+/// a completion and a reopening in a row, each guarded by the etag the one
+/// before it left — with no sync in between, which is where an etag the
+/// store did not keep turned the second write into a 412.
+#[tokio::test]
+#[ignore = "needs a live Radicale on 127.0.0.1:5232"]
+async fn a_folded_task_is_edited_completed_and_reopened_in_a_row() {
+    let base = base_url();
+    let user = format!("omacal-e2e-tasks-{}", std::process::id());
+    mkcalendar(&base, &user, "chores", "VTODO").await;
+    let client = CalDavClient::new(&base, &user, "pw").expect("client");
+    let href = format!("{base}/{user}/chores/e2e-folded.ics");
+    let seeded = client.put(&href, FOLDED_TODO, None).await.expect("seed PUT");
+
+    // The etag a write reads back when the PUT did not say, and what the
+    // server says it is now, agree.
+    let asked = client.etag_of(&href).await.expect("PROPFIND etag").expect("an etag");
+    if let Some(given) = &seeded {
+        assert_eq!(given, &asked, "the PUT's etag and the PROPFIND's agree");
+    }
+
+    let chores = client.discover().await.expect("discovery")
+        .into_iter().find(|c| c.display_name == "chores").expect("chores");
+    let resources = client.todos(&chores.url).await.expect("REPORT");
+    let raw = resources.iter().find(|r| r.url.ends_with("e2e-folded.ics")).expect("the task").ics.clone();
+    let now = jiff::Timestamp::from_millisecond(1_790_000_000_000).unwrap();
+
+    // Edit: a new title, a new date, a note.
+    let edit = omacal_caldav::TodoEdit {
+        summary: "Pay the rent",
+        due: Some(omacal_caldav::TodoDue::Date(jiff::civil::date(2026, 9, 19))),
+        description: Some("to the landlord"),
+    };
+    let edited = omacal_caldav::patch_todo_fields(&raw, "e2e-folded", &edit, "Europe/Sofia", now).expect("edit patch");
+    let etag = client.put(&href, &edited, Some(&asked)).await.expect("edit PUT");
+    let etag = match etag { Some(e) => e, None => client.etag_of(&href).await.unwrap().unwrap() };
+
+    // Complete, then reopen, each behind the etag the last write left.
+    let done = omacal_caldav::patch_todo_status(&edited, "e2e-folded", true, now).expect("complete patch");
+    let etag2 = client.put(&href, &done, Some(&etag)).await.expect("completion PUT behind the edit's etag");
+    let etag2 = match etag2 { Some(e) => e, None => client.etag_of(&href).await.unwrap().unwrap() };
+    let reopened = omacal_caldav::patch_todo_status(&done, "e2e-folded", false, now).expect("reopen patch");
+    client.put(&href, &reopened, Some(&etag2)).await.expect("reopen PUT behind the completion's etag");
+
+    // A stale etag is still refused: the guard is real, not skipped.
+    let stale = client.put(&href, &reopened, Some(&etag)).await;
+    assert!(matches!(stale, Err(omacal_caldav::CalDavError::PreconditionFailed)), "{stale:?}");
+
+    // And what the server holds reads back whole.
+    let back = client.todos(&chores.url).await.unwrap()
+        .into_iter().find(|r| r.url.ends_with("e2e-folded.ics")).unwrap().ics;
+    let root = omacal_caldav::parse(&back).expect("parses");
+    let todo = omacal_caldav::todos_in(&root).into_iter().next().expect("one VTODO");
+    assert_eq!(todo.uid, "e2e-folded", "no continuation line joined the UID");
+    assert_eq!(todo.summary.as_deref(), Some("Pay the rent"));
+    assert_eq!(todo.description.as_deref(), Some("to the landlord"));
+    assert_eq!(todo.status.to_ascii_uppercase(), "NEEDS-ACTION");
+    assert!(matches!(todo.due, Some(omacal_caldav::IcsTime::Date(d)) if d == jiff::civil::date(2026, 9, 19)));
+    let vtodo = root.components("VTODO").next().unwrap();
+    assert_eq!(vtodo.prop_value("X-KEEP-ME"), Some("vendor line"));
+    let alarm = vtodo.components("VALARM").next().expect("the alarm survived three writes");
+    assert_eq!(alarm.prop_value("DESCRIPTION"), Some("Reminder"));
+
+    // A replace with no etag known is not a create, and does not 412.
+    client.put_unguarded(&href, &reopened).await.expect("unguarded replace of an existing task");
+}
+
 #[tokio::test]
 #[ignore = "needs a live Radicale on 127.0.0.1:5232"]
 async fn contacts_come_back_from_a_real_address_book() {

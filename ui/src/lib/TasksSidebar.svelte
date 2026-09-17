@@ -1,16 +1,22 @@
 <!-- ui/src/lib/TasksSidebar.svelte -->
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { dateFormat } from './date.svelte';
+  import { weekStartDay } from './weekstartstore.svelte';
   import DateField from './DateField.svelte';
+  import TimeField from './TimeField.svelte';
   import { clockFormat } from './clock.svelte';
   import {
-    createLocalTaskList, createTask, deleteTask, listTasks, setTaskCompleted, taskLists, updateTask,
-    type Task, type TaskList,
+    createLocalTaskList, createTask, deleteTask, searchDoneTasks, setTaskCompleted, updateTask,
+    type Task,
   } from './tasks';
+  import {
+    refreshTasks, setTaskLists, setTaskRows, taskListRows, taskRevision, taskRows,
+  } from './taskstore.svelte';
   import { TASKS_WIDTH_DEFAULT, TASKS_WIDTH_MAX, TASKS_WIDTH_MIN, clampTasksWidth } from './taskwidth';
   import {
-    dateInputValue, dueFromInputs, dueLabel, isOverdue, quickDue, timeInputValue,
-    whenOf, WHEN_LABEL, WHEN_ORDER, type When,
+    dateInputValue, doneLabel, doneToday, dueFromInputs, dueLabel, isOverdue, quickDue,
+    timeInputValue, todayStartMs, whenOf, WHEN_LABEL, WHEN_ORDER, type When,
   } from './taskdates';
 
   /** The tasks list, beside the calendar rather than over it.
@@ -23,10 +29,8 @@
    *  A row opens in place for editing. That is the whole of what a task can
    *  be given here: a title, a due date and a note, which is exactly what a
    *  VTODO carries and this app can write back. */
-  let { onclose, onchange, width = TASKS_WIDTH_DEFAULT, onresize }: {
+  let { onclose, width = TASKS_WIDTH_DEFAULT, onresize }: {
     onclose: () => void;
-    /** Told whenever the set of tasks changed, so the grid can redraw. */
-    onchange?: () => void;
     /** The panel's width in pixels (#130). The caller owns it, because the
      *  caller is what stores it. */
     width?: number;
@@ -73,8 +77,10 @@
     e.preventDefault();
   }
 
-  let tasks = $state<Task[] | null>(null);
-  let lists = $state<TaskList[]>([]);
+  /** `taskstore`'s one copy, which the grid draws from too: a task ticked
+   *  off on the week is ticked off here, and the other way round. */
+  const tasks = $derived(taskRows());
+  const lists = $derived(taskListRows());
   let note = $state<string | null>(null);
   let busyIds = $state<Set<number>>(new Set());
 
@@ -88,6 +94,9 @@
   /** The row open for editing, and its fields while they are being typed. */
   let editingId = $state<number | null>(null);
   let draft = $state({ summary: '', date: '', time: '', notes: '' });
+  /** The time field holds something that is not a time. Save waits for it:
+   *  saving would quietly make the task all-day. */
+  let timeInvalid = $state(false);
   let saving = $state(false);
 
   /** Recomputed on every load rather than ticking: the groups only move at
@@ -104,7 +113,7 @@
     making = true;
     note = null;
     try {
-      lists = await createLocalTaskList();
+      setTaskLists(await createLocalTaskList());
       await load();
     } catch (e) {
       note = String(e);
@@ -115,13 +124,12 @@
 
   async function load() {
     try {
-      const [t, l] = await Promise.all([listTasks(), taskLists()]);
+      await refreshTasks();
       nowMs = Date.now();
-      tasks = t;
-      lists = l;
     } catch (e) {
       note = String(e);
-      tasks = [];
+      // Out of "Loading…", but never over a list the grid already has.
+      if (taskRows() === null) setTaskRows([]);
     }
   }
   $effect(() => { void load(); });
@@ -132,7 +140,51 @@
       : (lists.find((l) => l.calendarId === filterListId) ?? null),
   );
   const open = $derived((tasks ?? []).filter((t) => !t.completed));
-  const done = $derived((tasks ?? []).filter((t) => t.completed));
+  /** The Done list shows today's by default: what was finished today is
+   *  still part of today, and a week of ticked boxes buries it. The rest is
+   *  one press away (`earlier`). */
+  const done = $derived((tasks ?? []).filter((t) => doneToday(t, nowMs)));
+
+  /** The Done history, fetched only when somebody opens it: completed
+   *  before today, newest first, searchable, a page at a time. */
+  const EARLIER_PAGE = 30;
+  let earlierOpen = $state(false);
+  let earlierQuery = $state('');
+  let earlier = $state<Task[] | null>(null);
+  let earlierMore = $state(false);
+  /** Which request is the latest, so a slow answer to "ba" cannot land over
+   *  the answer to "bank" typed after it. */
+  let earlierAsk = 0;
+
+  async function loadEarlier(count = EARLIER_PAGE, offset = 0) {
+    const ask = ++earlierAsk;
+    try {
+      const page = await searchDoneTasks(earlierQuery.trim(), todayStartMs(nowMs), offset, count);
+      if (ask !== earlierAsk) return;
+      earlier = offset === 0 ? page.tasks : [...(earlier ?? []), ...page.tasks];
+      earlierMore = page.more;
+    } catch (e) {
+      if (ask === earlierAsk) note = String(e);
+    }
+  }
+
+  let earlierTimer: ReturnType<typeof setTimeout> | undefined;
+  function searchEarlier() {
+    clearTimeout(earlierTimer);
+    earlierTimer = setTimeout(() => void loadEarlier(), 180);
+  }
+
+  // Asked again whenever the tasks change while it is open — a reopened task
+  // leaves it, one completed in the grid moves into today's — keeping as
+  // many rows as were already loaded, so "Show more" is not undone.
+  $effect(() => {
+    taskRevision();
+    if (!earlierOpen) return;
+    // Untracked: the query and the loaded rows are read inside, and typing
+    // is `searchEarlier`'s to debounce, not this effect's to chase.
+    untrack(() => void loadEarlier(Math.max(EARLIER_PAGE, earlier?.length ?? 0)));
+  });
+  $effect(() => () => clearTimeout(earlierTimer));
 
   /** The rows under each heading, in the order the headings appear. */
   const byWhen = $derived(
@@ -142,7 +194,7 @@
       warn: when === 'overdue',
       color: null as string | null,
       rows: open
-        .filter((t) => whenOf(t, nowMs) === when)
+        .filter((t) => whenOf(t, nowMs, weekStartDay()) === when)
         .sort((a, b) => (a.dueMs ?? Infinity) - (b.dueMs ?? Infinity)),
     })).filter((g) => g.rows.length > 0),
   );
@@ -167,8 +219,7 @@
     note = null;
     busyIds = new Set([...busyIds, task.id]);
     try {
-      tasks = await setTaskCompleted(task.id, !task.completed);
-      onchange?.();
+      setTaskRows(await setTaskCompleted(task.id, !task.completed));
     } catch (e) {
       note = String(e);
     } finally {
@@ -182,8 +233,7 @@
     note = null;
     try {
       if (editingId === task.id) editingId = null;
-      tasks = await deleteTask(task.id);
-      onchange?.();
+      setTaskRows(await deleteTask(task.id));
     } catch (e) {
       note = String(e);
     }
@@ -194,9 +244,8 @@
     note = null;
     adding = true;
     try {
-      tasks = await createTask(targetList.calendarId, newTitle, null);
+      setTaskRows(await createTask(targetList.calendarId, newTitle, null));
       newTitle = '';
-      onchange?.();
     } catch (e) {
       note = String(e);
     } finally {
@@ -207,6 +256,7 @@
   function edit(task: Task) {
     if (!task.canWrite) return;
     editingId = task.id;
+    timeInvalid = false;
     draft = {
       summary: task.summary,
       date: task.dueMs === null ? '' : dateInputValue(task.dueMs),
@@ -222,17 +272,16 @@
   }
 
   async function save() {
-    if (saving || editingId === null || draft.summary.trim() === '') return;
+    if (saving || editingId === null || draft.summary.trim() === '' || timeInvalid) return;
     saving = true;
     note = null;
     const { ms, allDay } = dueFromInputs(draft.date, draft.time);
     try {
-      tasks = await updateTask(
+      setTaskRows(await updateTask(
         editingId, draft.summary, ms, allDay, draft.notes.trim() || null,
-      );
+      ));
       nowMs = Date.now();
       editingId = null;
-      onchange?.();
     } catch (e) {
       note = String(e);
     } finally {
@@ -240,6 +289,23 @@
     }
   }
 </script>
+
+{#snippet doneRow(t: Task, dated: boolean)}
+  <div class="row done">
+    <input
+      type="checkbox"
+      checked={true}
+      disabled={!t.canWrite || busyIds.has(t.id)}
+      aria-label="Reopen {t.summary}"
+      onchange={() => toggle(t)}
+    />
+    <span class="tick" style:background={listColor(t)}></span>
+    <span class="title">{t.summary}</span>
+    {#if dated}
+      <span class="due">{doneLabel(t, nowMs, dateFormat())}</span>
+    {/if}
+  </div>
+{/snippet}
 
 <aside class="side" aria-label="Tasks" style="width:{width}px; flex-basis:{width}px">
   <div class="top">
@@ -325,15 +391,19 @@
               </div>
               <div class="when">
                 <DateField label="Due date" bind:value={draft.date} disabled={saving} />
-                <input type="time" aria-label="Due time" bind:value={draft.time}
-                       disabled={saving || draft.date === ''} />
+                <!-- Offered with or without a date: a time picked first lands
+                     on today, and the date field says so, rather than the
+                     field sitting disabled until the order is guessed. -->
+                <TimeField label="Due time" bind:value={draft.time} bind:invalid={timeInvalid} disabled={saving}
+                           isToday={draft.date === '' || draft.date === dateInputValue(Date.now())}
+                           onchange={(v) => { if (v && draft.date === '') draft.date = dateInputValue(Date.now()); }} />
               </div>
               <textarea class="enotes" aria-label="Notes" rows="2" placeholder="Notes"
                         bind:value={draft.notes} disabled={saving}></textarea>
               <div class="eact">
                 <button onclick={() => (editingId = null)} disabled={saving}>Cancel</button>
                 <button class="go" onclick={() => void save()}
-                        disabled={saving || draft.summary.trim() === ''}>
+                        disabled={saving || draft.summary.trim() === '' || timeInvalid}>
                   {saving ? 'Saving…' : 'Save'}
                 </button>
               </div>
@@ -363,20 +433,39 @@
       {/each}
 
       {#if done.length > 0}
-        <div class="head"><span class="hlabel">Done</span><span class="count">{done.length}</span></div>
+        <div class="head"><span class="hlabel">Done today</span><span class="count">{done.length}</span></div>
         {#each done as t (t.id)}
-          <div class="row done">
-            <input
-              type="checkbox"
-              checked={true}
-              disabled={!t.canWrite || busyIds.has(t.id)}
-              aria-label="Reopen {t.summary}"
-              onchange={() => toggle(t)}
-            />
-            <span class="tick" style:background={listColor(t)}></span>
-            <span class="title">{t.summary}</span>
-          </div>
+          {@render doneRow(t, false)}
         {/each}
+      {/if}
+
+      {#if lists.length > 0 || earlierOpen}
+        <button type="button" class="earlier-toggle" aria-expanded={earlierOpen}
+                onclick={() => {
+                  earlierOpen = !earlierOpen;
+                  if (!earlierOpen) { earlierQuery = ''; earlier = null; }
+                }}>
+          {earlierOpen ? 'Hide earlier done tasks' : 'Show earlier done tasks'}
+        </button>
+      {/if}
+      {#if earlierOpen}
+        <div class="head"><span class="hlabel">Done earlier</span></div>
+        <input class="earlier-search" type="search" aria-label="Search done tasks"
+               placeholder="Search done tasks…" bind:value={earlierQuery} oninput={searchEarlier} />
+        {#if earlier === null}
+          <p class="empty">Loading…</p>
+        {:else if earlier.length === 0}
+          <p class="empty">{earlierQuery.trim() ? 'No done tasks match.' : 'Nothing done before today.'}</p>
+        {:else}
+          {#each earlier as t (t.id)}
+            {@render doneRow(t, true)}
+          {/each}
+          {#if earlierMore}
+            <button type="button" class="earlier-toggle" onclick={() => void loadEarlier(EARLIER_PAGE, earlier?.length ?? 0)}>
+              Show more
+            </button>
+          {/if}
+        {/if}
       {/if}
     {/if}
   </div>
@@ -485,10 +574,7 @@
                   padding: 3px 8px; border-radius: 5px; border: 0; cursor: pointer;
                   background: color-mix(in srgb, var(--text) 5%, transparent); color: var(--text); }
   .quick button.clear { background: none; color: var(--muted); }
-  .when { display: flex; gap: 6px; }
-  .when input { font: inherit; font-size: 11px; padding: 4px 7px; border-radius: 5px;
-                border: 1px solid var(--hairline); background: var(--bg); color: var(--text);
-                font-variant-numeric: tabular-nums; }
+  .when { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
   .enotes { font: inherit; font-size: 11px; resize: vertical; padding: 6px 8px; border-radius: 5px;
             border: 1px solid var(--hairline); background: var(--bg); color: var(--text); }
   .eact { display: flex; justify-content: flex-end; gap: 6px; }
@@ -499,4 +585,11 @@
   .eact button:disabled, .quick button:disabled, .add input:disabled { opacity: .5; cursor: default; }
 
   .empty { color: var(--muted); padding: 10px 6px; line-height: 1.5; }
+  .earlier-toggle { appearance: none; -webkit-appearance: none; font: inherit; font-size: 11px;
+                    color: var(--muted); background: none; border: 0; cursor: pointer;
+                    padding: 8px 6px 4px; text-align: left; }
+  .earlier-toggle:hover { color: var(--text); }
+  .earlier-search { font: inherit; font-size: 11.5px; width: 100%; box-sizing: border-box;
+                    margin: 2px 0 4px; padding: 5px 8px; border-radius: 6px;
+                    border: 1px solid var(--hairline); background: var(--surface); color: var(--text); }
 </style>

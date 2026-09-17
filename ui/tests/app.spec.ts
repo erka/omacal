@@ -5673,7 +5673,7 @@ test.describe('the tasks sidebar', () => {
   test('an overdue task is marked, and a done one never is', async ({ page }) => {
     const side = await openTasks(page);
     await expect(side.locator('.due.overdue')).toHaveCount(1);
-    await expect(side.locator('.hlabel', { hasText: /^Done$/ })).toBeVisible();
+    await expect(side.locator('.hlabel', { hasText: /^Done today$/ })).toBeVisible();
     await expect(side.getByText('Old standup note')).toBeVisible();
   });
 
@@ -5956,6 +5956,338 @@ test.describe('tasks on the grid', () => {
     // Forward a year: nothing is due there.
     for (let i = 0; i < 5; i += 1) await page.keyboard.press('l');
     await expect(page.locator('.trow')).toHaveCount(0);
+  });
+});
+
+/**
+ * One list of tasks for the whole window (2026-09-17). The grid and the
+ * sidebar used to hold a copy each, so a task ticked off on the week stayed
+ * open in the sidebar until it was closed and opened again.
+ */
+test.describe('tasks, the grid and the sidebar agree', () => {
+  const open = async (page: Page, fixture = 'default') => {
+    await page.clock.setFixedTime(APP_NOW);
+    await page.goto(app(fixture));
+    await expect(page.locator('.ev').first()).toBeVisible();
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Tasks…' }).click();
+    return page.getByRole('complementary', { name: 'Tasks' });
+  };
+  const openRows = (side: ReturnType<Page['getByRole']>) => side.locator('.row:not(.done)');
+  const doneRows = (side: ReturnType<Page['getByRole']>) => side.locator('.row.done');
+
+  test('a task ticked off in the grid is ticked off in the open sidebar', async ({ page }) => {
+    const side = await open(page);
+    await expect(openRows(side).getByText('Ship the release')).toBeVisible();
+
+    await page.locator('.trow').getByRole('checkbox', { name: 'Complete Ship the release' }).click();
+
+    await expect(openRows(side).getByText('Ship the release')).toHaveCount(0);
+    await expect(doneRows(side).getByText('Ship the release')).toBeVisible();
+    await expect(page.locator('.trow').getByText('Ship the release')).toHaveCount(0);
+  });
+
+  test('a task drawn at its hour, ticked off there, is done in the sidebar too', async ({ page }) => {
+    const side = await open(page, 'timed-task');
+    await page.getByTestId('week-body').getByRole('checkbox', { name: 'Complete Call the bank' }).click();
+    await expect(doneRows(side).getByText('Call the bank')).toBeVisible();
+    await expect(page.locator('.tpin')).toHaveCount(0);
+  });
+
+  /** Found 2026-09-17: a failed write left the box ticked over a task that
+   *  was still open, and clicking again sent a second completion. */
+  test('a tick that fails unticks, and says why', async ({ page }) => {
+    await page.clock.setFixedTime(APP_NOW);
+    await page.goto(app());
+    const box = page.locator('.trow').getByRole('checkbox', { name: 'Complete Ship the release' });
+    await page.evaluate(() => (window as any).__harness.failNextCalendarCall('set_task_completed', 'that task changed on the server'));
+    await box.click();
+    await expect(page.getByText('that task changed on the server')).toBeVisible();
+    await expect(box).not.toBeChecked();
+    await expect(box).toBeEnabled();
+  });
+
+  test('a tick waits for its write, and a second click sends nothing', async ({ page }) => {
+    await page.clock.setFixedTime(APP_NOW);
+    await page.goto(app());
+    const box = page.locator('.trow').getByRole('checkbox', { name: 'Complete Ship the release' });
+    await page.evaluate(() => (window as any).__harness.holdNextCalendarCall('set_task_completed'));
+    await box.click();
+    await expect(box).toBeDisabled();
+    await box.click({ force: true });
+    const writes = () => page.evaluate(() =>
+      (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_task_completed').length);
+    expect(await writes()).toBe(1);
+
+    const rows = await page.evaluate(() => (window as any).__TAURI_INTERNALS__.invoke('list_tasks'));
+    const done = rows.map((t: any) => (t.id === 12 ? { ...t, completed: true, completedMs: Date.now() } : t));
+    await page.evaluate((v) => (window as any).__harness.releaseCalendarCall('set_task_completed', v), done);
+    await expect(page.locator('.trow').getByText('Ship the release')).toHaveCount(0);
+    expect(await writes()).toBe(1);
+  });
+
+  test('a task ticked off in the sidebar leaves the grid', async ({ page }) => {
+    const side = await open(page);
+    await openRows(side).getByRole('checkbox', { name: 'Complete Ship the release' }).click();
+    await expect(page.locator('.trow').getByText('Ship the release')).toHaveCount(0);
+  });
+
+  test('a task reopened in the sidebar comes back to the grid', async ({ page }) => {
+    const side = await open(page);
+    await page.locator('.trow').getByRole('checkbox', { name: 'Complete Ship the release' }).click();
+    await doneRows(side).getByRole('checkbox', { name: 'Reopen Ship the release' }).click();
+    await expect(page.locator('.trow').getByText('Ship the release')).toBeVisible();
+  });
+
+  /** The audit's scenario: a drag on the grid, then an edit in the sidebar,
+   *  must not send the date from before the drag. */
+  test('a task moved on the grid is saved with its new date from the sidebar', async ({ page }) => {
+    const side = await open(page);
+    const title = page.locator('.trow .tchip .tt', { hasText: 'Ship the release' });
+    const from = (await title.boundingBox())!;
+    const cell = (await page.locator('.trow .tcell').first().boundingBox())!;
+    await page.mouse.move(from.x + 4, from.y + from.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(from.x + 4 + cell.width * 2, from.y + from.height / 2, { steps: 8 });
+    await page.mouse.up();
+    await expect(openRows(side).filter({ hasText: 'Ship the release' }).locator('.due')).toHaveText('Wed 31');
+
+    await side.getByRole('button', { name: 'Ship the release' }).click();
+    await side.getByRole('textbox', { name: 'Task title', exact: true }).fill('Ship 4.2');
+    await side.getByRole('button', { name: 'Save' }).click();
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__harness.calls.filter((c: any) => c.cmd === 'update_task').pop()?.args,
+    )).toMatchObject({ summary: 'Ship 4.2', dueMs: Date.UTC(2024, 0, 31), dueAllDay: true });
+  });
+
+  /** A task completed on the phone arrives with a sync, and both places
+   *  show it — neither keeps the list from when the window opened. */
+  test('a sync brings task changes to the grid and the sidebar', async ({ page }) => {
+    const side = await open(page);
+    await expect(page.locator('.trow').getByText('Ship the release')).toBeVisible();
+    // The server's change, made behind the window's back.
+    await page.evaluate(() => (window as any).__TAURI_INTERNALS__.invoke('set_task_completed', { id: 12, on: true }));
+    await page.evaluate(() => (window as any).__harness.emit('sync-finished', null));
+
+    await expect(page.locator('.trow').getByText('Ship the release')).toHaveCount(0);
+    await expect(doneRows(side).getByText('Ship the release')).toBeVisible();
+  });
+});
+
+/**
+ * The task editor's time field (2026-09-17, by request): the native one was
+ * a small box whose empty state read as "12:30 PM", edited a segment at a
+ * time. This one is typed or picked from a list, in the app's own clock.
+ */
+test.describe('the task time field', () => {
+  const editor = async (page: Page, title: string, fixture = 'default') => {
+    await page.clock.setFixedTime(APP_NOW);
+    await page.goto(app(fixture));
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Tasks…' }).click();
+    const side = page.getByRole('complementary', { name: 'Tasks' });
+    await side.getByRole('button', { name: title }).click();
+    return side;
+  };
+  const time = (side: ReturnType<Page['getByRole']>) => side.getByRole('combobox', { name: 'Due time' });
+  const lastUpdate = (page: Page) => page.evaluate(() =>
+    (window as any).__harness.calls.filter((c: any) => c.cmd === 'update_task').pop()?.args);
+
+  test('an empty time reads as empty, not as a time', async ({ page }) => {
+    const side = await editor(page, 'Ship the release');
+    await expect(time(side)).toHaveValue('');
+    await expect(time(side)).toHaveAttribute('placeholder', 'Add time');
+    await expect(side.getByRole('listbox')).toHaveCount(0);
+  });
+
+  test('a time picked for a task with no date lands on today', async ({ page }) => {
+    const side = await editor(page, 'Buy milk');
+    await expect(side.getByRole('textbox', { name: 'Due date' })).toHaveValue('');
+    await time(side).click();
+    const list = side.getByRole('listbox', { name: 'Due time options' });
+    await expect(list).toBeVisible();
+    // Opened on the next half hour after noon, where "later today" starts.
+    await expect(list.locator('[data-active]')).toHaveText('12:30');
+
+    await list.getByRole('option', { name: '14:00' }).click();
+    await expect(list).toHaveCount(0);
+    await expect(time(side)).toHaveValue('14:00');
+    await expect(side.getByRole('textbox', { name: 'Due date' })).toHaveValue('2024-01-29');
+
+    await side.getByRole('button', { name: 'Save' }).click();
+    await expect.poll(() => lastUpdate(page))
+      .toMatchObject({ summary: 'Buy milk', dueMs: APP_MON + 14 * 3_600_000, dueAllDay: false });
+  });
+
+  test('a time can be typed in any spelling, and reads back in the app\'s clock', async ({ page }) => {
+    const side = await editor(page, 'Ship the release');
+    await time(side).fill('3pm');
+    await time(side).press('Enter');
+    await expect(time(side)).toHaveValue('15:00');
+    await side.getByRole('button', { name: 'Save' }).click();
+    await expect.poll(() => lastUpdate(page))
+      .toMatchObject({ dueMs: APP_MON + 15 * 3_600_000, dueAllDay: false });
+  });
+
+  test('with a twelve-hour clock the list and the field say AM and PM', async ({ page }) => {
+    await page.addInitScript(() =>
+      sessionStorage.setItem('omacal-stub-settings', JSON.stringify({ timeFormat: '12h' })));
+    const side = await editor(page, 'Ship the release');
+    await time(side).click();
+    await side.getByRole('option', { name: '2:00 PM', exact: true }).click();
+    await expect(time(side)).toHaveValue('2:00 PM');
+    await side.getByRole('button', { name: 'Save' }).click();
+    await expect.poll(() => lastUpdate(page)).toMatchObject({ dueMs: APP_MON + 14 * 3_600_000 });
+  });
+
+  test('the list opens on the task\'s own time and follows the arrow keys', async ({ page }) => {
+    const side = await editor(page, 'Call the bank', 'timed-task');
+    await expect(time(side)).toHaveValue('11:30');
+    await time(side).focus();
+    await page.keyboard.press('ArrowDown');
+    const list = side.getByRole('listbox', { name: 'Due time options' });
+    await expect(list.locator('[data-active]')).toHaveText('11:30');
+    await page.keyboard.press('ArrowDown');
+    await expect(list.locator('[data-active]')).toHaveText('12:00');
+    await expect(time(side)).toHaveAttribute('aria-activedescendant', /12:00$/);
+    await page.keyboard.press('Enter');
+    await expect(list).toHaveCount(0);
+    await expect(time(side)).toHaveValue('12:00');
+    await side.getByRole('button', { name: 'Save' }).click();
+    await expect.poll(() => lastUpdate(page)).toMatchObject({ dueMs: APP_MON + 12 * 3_600_000, dueAllDay: false });
+  });
+
+  /** Saving around it would quietly make the task all-day. */
+  test('something that is not a time is marked, and holds Save until fixed', async ({ page }) => {
+    const side = await editor(page, 'Ship the release');
+    await time(side).fill('soon');
+    await time(side).press('Tab');
+    await expect(time(side)).toHaveAttribute('aria-invalid', 'true');
+    await expect(side.getByRole('button', { name: 'Save' })).toBeDisabled();
+
+    await time(side).fill('9:30am');
+    await time(side).press('Tab');
+    await expect(time(side)).not.toHaveAttribute('aria-invalid', 'true');
+    await expect(time(side)).toHaveValue('09:30');
+    await expect(side.getByRole('button', { name: 'Save' })).toBeEnabled();
+  });
+
+  test('clearing the time keeps the day, all day', async ({ page }) => {
+    const side = await editor(page, 'Call the bank', 'timed-task');
+    await side.getByRole('button', { name: 'Clear due time' }).click();
+    await expect(time(side)).toHaveValue('');
+    await expect(side.getByRole('textbox', { name: 'Due date' })).toHaveValue('2024-01-29');
+    await side.getByRole('button', { name: 'Save' }).click();
+    await expect.poll(() => lastUpdate(page)).toMatchObject({ dueMs: APP_MON, dueAllDay: true });
+  });
+
+  test('Escape closes the list and leaves the editor open', async ({ page }) => {
+    const side = await editor(page, 'Ship the release');
+    await time(side).click();
+    await expect(side.getByRole('listbox')).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(side.getByRole('listbox')).toHaveCount(0);
+    await expect(side.getByRole('textbox', { name: 'Task title', exact: true })).toBeVisible();
+  });
+
+  test('a press anywhere else closes the list without choosing', async ({ page }) => {
+    const side = await editor(page, 'Ship the release');
+    await time(side).click();
+    await expect(side.getByRole('listbox')).toBeVisible();
+    await page.mouse.click(600, 400);
+    await expect(side.getByRole('listbox')).toHaveCount(0);
+    await expect(time(side)).toHaveValue('');
+  });
+});
+
+/**
+ * The Done list (2026-09-17, by request): today's by default, the rest one
+ * press away, searchable and a page at a time.
+ */
+test.describe('done tasks', () => {
+  const openTasks = async (page: Page) => {
+    await page.clock.setFixedTime(APP_NOW);
+    await page.goto(app());
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Tasks…' }).click();
+    return page.getByRole('complementary', { name: 'Tasks' });
+  };
+  const titles = (side: ReturnType<Page['getByRole']>) => side.locator('.row.done .title');
+
+  test('the Done list shows today\'s, and the earlier ones on request', async ({ page }) => {
+    const side = await openTasks(page);
+    await expect(side.locator('.hlabel', { hasText: /^Done today$/ })).toBeVisible();
+    await expect(titles(side)).toHaveText(['Old standup note']);
+    // Done four days ago: still in `list_tasks`' week, but not today's.
+    await expect(side.getByText('Renew the passport')).toHaveCount(0);
+
+    await side.getByRole('button', { name: 'Show earlier done tasks' }).click();
+    await expect(titles(side)).toHaveText([
+      'Old standup note', 'Renew the passport', 'Close the Q4 books', 'Обади се на банката', 'Fix the bike',
+    ]);
+    await expect(side.locator('.row.done', { hasText: 'Renew the passport' }).locator('.due')).toHaveText('Jan 25');
+    await expect(side.locator('.row.done', { hasText: 'Обади се на банката' }).locator('.due')).toHaveText('Dec 20, 2023');
+    // Asked from today's midnight, so nothing of today's comes back as earlier.
+    const ask = await page.evaluate(() =>
+      (window as any).__harness.calls.filter((c: any) => c.cmd === 'search_done_tasks').pop()?.args);
+    expect(ask).toMatchObject({ query: '', beforeMs: APP_MON, offset: 0 });
+  });
+
+  test('the search matches every word, in the title or the note, in any case', async ({ page }) => {
+    const side = await openTasks(page);
+    await side.getByRole('button', { name: 'Show earlier done tasks' }).click();
+    const search = side.getByRole('searchbox', { name: 'Search done tasks' });
+
+    await search.fill('accountant');
+    await expect(titles(side)).toHaveText(['Old standup note', 'Close the Q4 books']);
+    await search.fill('q4 CLOSE');
+    await expect(titles(side)).toHaveText(['Old standup note', 'Close the Q4 books']);
+    await search.fill('банката');
+    await expect(titles(side)).toHaveText(['Old standup note', 'Обади се на банката']);
+    await search.fill('nothing like this');
+    await expect(side.getByText('No done tasks match.')).toBeVisible();
+  });
+
+  test('reopening an earlier task puts it back among the open ones', async ({ page }) => {
+    const side = await openTasks(page);
+    await side.getByRole('button', { name: 'Show earlier done tasks' }).click();
+    await side.getByRole('checkbox', { name: 'Reopen Close the Q4 books' }).click();
+
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_task_completed').pop()?.args,
+    )).toMatchObject({ id: 21, on: false });
+    await expect(side.locator('.row:not(.done)').getByText('Close the Q4 books')).toBeVisible();
+    await expect(side.locator('.row.done').getByText('Close the Q4 books')).toHaveCount(0);
+  });
+
+  test('a task ticked off now joins Done today', async ({ page }) => {
+    const side = await openTasks(page);
+    await side.getByRole('checkbox', { name: 'Complete Buy milk' }).click();
+    await expect(titles(side)).toContainText(['Buy milk']);
+  });
+
+  test('a long history comes a page at a time', async ({ page }) => {
+    const side = await openTasks(page);
+    await page.evaluate(() => (window as any).__harness.seedDoneHistory(45));
+    await side.getByRole('button', { name: 'Show earlier done tasks' }).click();
+    const chores = side.locator('.row.done .title', { hasText: /^Old chore \d+$/ });
+    // Thirty to a page, and "Renew the passport" is one of them.
+    await expect(chores).toHaveCount(29);
+    await side.getByRole('button', { name: 'Show more' }).click();
+    await expect(chores).toHaveCount(45);
+    await expect(side.getByRole('button', { name: 'Show more' })).toHaveCount(0);
+  });
+
+  test('hiding the earlier list forgets its search', async ({ page }) => {
+    const side = await openTasks(page);
+    await side.getByRole('button', { name: 'Show earlier done tasks' }).click();
+    await side.getByRole('searchbox', { name: 'Search done tasks' }).fill('bike');
+    await expect(titles(side)).toHaveText(['Old standup note', 'Fix the bike']);
+    await side.getByRole('button', { name: 'Hide earlier done tasks' }).click();
+    await expect(titles(side)).toHaveText(['Old standup note']);
+    await side.getByRole('button', { name: 'Show earlier done tasks' }).click();
+    await expect(side.getByRole('searchbox', { name: 'Search done tasks' })).toHaveValue('');
+    await expect(titles(side)).toHaveCount(5);
   });
 });
 

@@ -16,6 +16,7 @@ import EventForm from '../../src/lib/EventForm.svelte';
 import DeleteConfirm from '../../src/lib/DeleteConfirm.svelte';
 import * as eventform from '../../src/lib/eventform';
 import * as drag from '../../src/lib/drag';
+import * as taskdates from '../../src/lib/taskdates';
 import { FIXTURES } from '../fixtures';
 import { installTauriStub } from './tauri';
 import { setPalette } from '../../src/lib/theme';
@@ -37,6 +38,10 @@ import { VIEW_BOX_CSS } from './viewbox';
 // answer it gives depends on the browser's zone, and `timezoneId` reaches the
 // browser context rather than Node.
 (window as any).__drag = drag;
+
+// The task date rules, for `__drag`'s reason: the quick answers are civil
+// days, and only a page in a zone with a clock change can tell.
+(window as any).__taskdates = taskdates;
 
 // The second-zone rune's writer, reachable from a spec. In the app the only
 // writer is `App`, seeded from settings; a component mounted standalone has

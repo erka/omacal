@@ -7,6 +7,7 @@ import { formatDate, type DateFormat } from './datefmt';
 
 import type { Task } from './tasks';
 import { formatClock } from './timefmt';
+import { startOfWeek, type WeekStartDay } from './weekstart';
 import type { TimeFormat } from './timefmt';
 
 /** The groups the "By when" list shows, in the order it shows them. */
@@ -43,16 +44,20 @@ export const daysAway = (dueMs: number, nowMs: number): number =>
  * the overdue group is what still needs doing, and a finished task shouting
  * in red is how a list stops being read. Its own section holds it instead.
  */
-export function whenOf(task: Task, nowMs: number): When {
+export function whenOf(task: Task, nowMs: number, weekStart: WeekStartDay = 'monday'): When {
   if (task.dueMs === null) return 'none';
   const away = daysAway(task.dueMs, nowMs);
   if (away < 0) return task.completed ? 'today' : 'overdue';
   if (away === 0) return 'today';
   if (away === 1) return 'tomorrow';
-  // "This week" is the days still ahead in the visible week rather than a
-  // rolling seven: a task due Friday stops being "this week" on Saturday,
-  // which is what a person means by it.
-  return away <= 6 - new Date(nowMs).getDay() + 1 ? 'week' : 'later';
+  // "This week" is the days still ahead in the week the calendar draws
+  // rather than a rolling seven: a task due Friday stops being "this week"
+  // on Saturday, which is what a person means by it. The week is the one
+  // the setting starts — the old arithmetic assumed Monday and, on a
+  // Sunday, counted the whole next week as this one (found 2026-09-17).
+  const next = new Date(startOfWeek(new Date(nowMs), weekStart));
+  next.setDate(next.getDate() + 7);
+  return dayStart(task.dueMs) < next.getTime() ? 'week' : 'later';
 }
 
 /** The short due label on a row: glanceable, never a timestamp.
@@ -76,6 +81,31 @@ export function dueLabel(task: Task, nowMs: number, format: TimeFormat = '24h', 
   return time ? `${day} ${time}` : day;
 }
 
+/** Midnight at the start of today, for the Done list's cutoff: what was
+ *  completed since is "today", and the history asks for what came before. */
+export const todayStartMs = (nowMs: number): number => dayStart(nowMs);
+
+/** Whether a task was completed today. One with no completion stamp cannot
+ *  be dated, so it is never today's — it waits in the history instead. */
+export const doneToday = (task: Task, nowMs: number): boolean =>
+  task.completed && task.completedMs !== null && task.completedMs >= dayStart(nowMs);
+
+/** When a task in the Done history was completed, as the row says it:
+ *  "Yesterday", then the date — with its year only once it is not this
+ *  year's. Empty for a task with no stamp, which is better than a guess. */
+export function doneLabel(task: Task, nowMs: number, dateFormat: DateFormat = 'locale'): string {
+  if (task.completedMs === null) return '';
+  const away = daysAway(task.completedMs, nowMs);
+  if (away === 0) return 'Today';
+  if (away === -1) return 'Yesterday';
+  if (dateFormat !== 'locale') return formatDate(task.completedMs, dateFormat);
+  const at = new Date(task.completedMs);
+  const sameYear = at.getFullYear() === new Date(nowMs).getFullYear();
+  return at.toLocaleDateString(undefined, sameYear
+    ? { month: 'short', day: 'numeric' }
+    : { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
 /** Whether the row's date should be shown as a warning. Completed tasks are
  *  excluded for `whenOf`'s reason. */
 export const isOverdue = (task: Task, nowMs: number): boolean =>
@@ -88,11 +118,14 @@ export const isOverdue = (task: Task, nowMs: number): boolean =>
  *  pairs them with `dueAllDay: true`. "Next week" is the coming Monday,
  *  which is what people mean by it far more often than "in seven days". */
 export function quickDue(kind: 'today' | 'tomorrow' | 'nextWeek', nowMs: number): number {
-  const start = dayStart(nowMs);
-  if (kind === 'today') return start;
-  if (kind === 'tomorrow') return start + 86_400_000;
-  const dow = new Date(start).getDay(); // 0 = Sunday
-  return start + ((8 - dow) % 7 || 7) * 86_400_000;
+  // Civil days, not multiples of 24 hours: the day the clocks go back is 25
+  // hours long, and "tomorrow" pressed on it landed on the same Sunday
+  // (found 2026-09-17).
+  const d = new Date(nowMs);
+  const on = (days: number) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + days).getTime();
+  if (kind === 'today') return on(0);
+  if (kind === 'tomorrow') return on(1);
+  return on((8 - d.getDay()) % 7 || 7); // 0 = Sunday
 }
 
 /** An `<input type="date">` value for a due date, in the viewer's zone. */

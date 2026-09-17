@@ -22,7 +22,7 @@ import type { TemperatureUnit } from '../../src/lib/temperature';
 import { sliceWeek } from '../../src/lib/weekwindow';
 import {
   labelledWeek, weekLabel, APP_FIVE_MIN_AGO, APP_NOW, APP_SERIES_ID, APP_SERIES_OCCURRENCE,
-  LOCAL_TASK_LIST, TASK_LISTS, TASKS, TIMED_TASK, IMPORT_PLANS,
+  LOCAL_TASK_LIST, TASK_LISTS, TASKS, TIMED_TASK, DONE_HISTORY, IMPORT_PLANS,
   APP_ONE_OFF_ID, APP_ONE_OFF_START, APP_GUESTS_ID, APP_SOLO_SERIES_ID,
   POPOVER_DETAILS, busyDayMonth,
   appWritableWeek, APP_WRITE_CALENDARS, APP_WEATHER, CREATED_DETAIL, crossZoneWeek,
@@ -64,6 +64,9 @@ export type Harness = {
   /** Start with no task lists and no tasks: the Google-only install, which
    *  has nowhere to put a task until `create_local_task_list` makes one. */
   noTaskLists(): void;
+  /** Replace the done history with `n` tasks, done a day apart going back
+   *  from yesterday — enough to need more than one page. */
+  seedDoneHistory(n: number): void;
   /** Make the next `update_event` reject — what a drag spec uses to prove a
    *  failed write is reported rather than silently swallowed. */
   failNextUpdate(message: string): void;
@@ -72,13 +75,13 @@ export type Harness = {
   failNextCreate(message: string): void;
   /** Make the next call to `set_calendar_selected` or `set_calendar_sync` reject —
    *  what a CalendarPopover spec uses to drive the failed-toggle path. */
-  failNextCalendarCall(cmd: 'set_calendar_selected' | 'set_calendar_sync', message: string): void;
+  failNextCalendarCall(cmd: 'set_calendar_selected' | 'set_calendar_sync' | 'set_task_completed', message: string): void;
   /** Park the *next* call to this calendar command instead of answering it —
    *  what a CalendarPopover spec uses to prove a second row's toggle doesn't
    *  free up a first row whose own call is still pending. */
-  holdNextCalendarCall(cmd: 'set_calendar_selected' | 'set_calendar_sync'): void;
+  holdNextCalendarCall(cmd: 'set_calendar_selected' | 'set_calendar_sync' | 'set_task_completed'): void;
   /** Answer the parked call for this command, then let its `.then` chain run. */
-  releaseCalendarCall(cmd: 'set_calendar_selected' | 'set_calendar_sync', value: unknown): Promise<void>;
+  releaseCalendarCall(cmd: 'set_calendar_selected' | 'set_calendar_sync' | 'set_task_completed', value: unknown): Promise<void>;
   /** Park the *next* `event_detail`, `refresh_event`, or `respond_to_event`
    *  call for this exact event id instead of answering it — what a
    *  `WeekGrid` spec uses to drive the supersession guard (open one block
@@ -240,6 +243,15 @@ const harness: Harness = {
   noTaskLists() {
     taskLists = [];
     taskRows = [];
+    doneHistory = [];
+  },
+  seedDoneHistory(n) {
+    const midnight = new Date(Date.now()).setHours(0, 0, 0, 0);
+    doneHistory = Array.from({ length: n }, (_, i) => ({
+      id: 5000 + i, calendarId: 1, summary: `Old chore ${i + 1}`, notes: null, dueMs: null,
+      dueAllDay: true, completed: true, completedMs: midnight - (i + 1) * 86_400_000 + 3_600_000,
+      calendar: 'Personal', color: '#5b8def', priority: 0, canWrite: true,
+    }));
   },
   failNextCreate(message) {
     failCreateOnce = message;
@@ -666,6 +678,8 @@ type StubSettings = {
 
 /** The stub's task rows, mutable for the life of the page. */
 let taskRows: typeof TASKS = [...TASKS];
+/** Done before `list_tasks`' week: reached only through the Done search. */
+let doneHistory: typeof TASKS = [...DONE_HISTORY];
 /** The stub's task lists. Mutable because an install can now make one
  *  (`create_local_task_list`), and `__harness.noTaskLists()` starts with
  *  none — the Google-only install the button exists for. */
@@ -1316,15 +1330,42 @@ export function installTauriStub(scenario: string): Harness {
         const list = taskLists.find((l) => l.calendarId === listId)!;
         taskRows = [...taskRows, {
           id: 900 + taskRows.length, calendarId: listId, summary: args.summary as string,
-          notes: null, dueMs: null, dueAllDay: false, completed: false,
+          notes: null, dueMs: null, dueAllDay: false, completed: false, completedMs: null,
           calendar: list.name, color: list.color, priority: 0, canWrite: true,
         }];
         return taskRows;
       }
-      case 'set_task_completed':
-        taskRows = taskRows.map((t) =>
-          t.id === args.id ? { ...t, completed: args.on as boolean } : t);
+      case 'set_task_completed': {
+        // A spec can make this one write fail, or park it: the grid's
+        // checkbox has to untick after a failure and wait out a slow one.
+        if (failCalendarOnce?.cmd === cmd || holdCalendarOnce === cmd) return calendarResult(cmd, taskRows);
+        const on = args.on as boolean;
+        const stamp = (t: (typeof TASKS)[number]) =>
+          ({ ...t, completed: on, completedMs: on ? Date.now() : null });
+        // Reopening an old one brings it back into the list, as the
+        // backend's does: it is open again, and open tasks are all listed.
+        const old = doneHistory.find((t) => t.id === args.id);
+        if (old) {
+          doneHistory = doneHistory.filter((t) => t.id !== args.id);
+          taskRows = [...taskRows, stamp(old)];
+        } else {
+          taskRows = taskRows.map((t) => (t.id === args.id ? stamp(t) : t));
+        }
         return taskRows;
+      }
+      // `tasks::done_page`: completed before the cutoff, newest first with
+      // the undated last, every word of the query in the title or note.
+      case 'search_done_tasks': {
+        const before = args.beforeMs as number | null;
+        const words = String(args.query).toLowerCase().split(/\s+/).filter(Boolean);
+        const hits = [...taskRows.filter((t) => t.completed), ...doneHistory]
+          .filter((t) => before === null || t.completedMs === null || t.completedMs < before)
+          .filter((t) => words.every((w) => `${t.summary}\n${t.notes ?? ''}`.toLowerCase().includes(w)))
+          .sort((a, b) => (b.completedMs ?? -Infinity) - (a.completedMs ?? -Infinity));
+        const offset = args.offset as number;
+        const limit = args.limit as number;
+        return { tasks: hits.slice(offset, offset + limit), more: hits.length > offset + limit };
+      }
       case 'update_task':
         taskRows = taskRows.map((t) => t.id === args.id ? {
           ...t,

@@ -345,15 +345,27 @@ const TASK_CAP: usize = 10;
 /// The bar-worthy slice of the task list: open, dated, and either overdue or
 /// due soon. Undated tasks are deliberately absent — "someday" is not a
 /// status-bar concern.
-pub(crate) fn assemble_tasks(rows: &[omacal_store::TaskRow], now_ms: i64) -> Vec<FeedTask> {
+///
+/// `due_ms` is the window's reading (`tasks::display_due_ms`): an all-day
+/// due is its date's midnight in the display zone, not the list's.
+pub(crate) fn assemble_tasks(rows: &[omacal_store::TaskRow], now_ms: i64, tz: &jiff::tz::TimeZone) -> Vec<FeedTask> {
     let mut out: Vec<FeedTask> = rows
         .iter()
         .filter(|r| r.task.status != "completed" && r.task.status != "cancelled")
         .filter_map(|r| {
-            let due_ms = r.task.due_utc?;
+            let due_ms = crate::tasks::display_due_ms(&r.task, tz)?;
             // An all-day due is "the whole day": overdue only once its day
-            // is over, not at one millisecond past midnight.
-            let deadline = if r.task.due_all_day { due_ms + 24 * 3_600_000 } else { due_ms };
+            // is over, not at one millisecond past midnight — and "over" is
+            // the next midnight, not 24 hours on, which a clock change moves.
+            let deadline = if r.task.due_all_day {
+                jiff::Timestamp::from_millisecond(due_ms)
+                    .ok()
+                    .and_then(|ts| ts.to_zoned(tz.clone()).date().tomorrow().ok())
+                    .and_then(|d| d.to_zoned(tz.clone()).ok())
+                    .map_or(due_ms + 24 * 3_600_000, |z| z.timestamp().as_millisecond())
+            } else {
+                due_ms
+            };
             if due_ms > now_ms.saturating_add(TASK_HORIZON_MS) {
                 return None;
             }
@@ -434,7 +446,7 @@ pub(crate) async fn current(pool: &SqlitePool, now_ms: i64) -> anyhow::Result<Fe
     // Tasks ride the same snapshot: overdue-or-imminent only, and a store
     // without a single CalDAV account contributes an empty list for free.
     let task_rows = omacal_store::tasks_for_ui(pool, now_ms).await?;
-    feed.tasks = assemble_tasks(&task_rows, now_ms);
+    feed.tasks = assemble_tasks(&task_rows, now_ms, &jiff::tz::TimeZone::system());
     let settings = crate::settings::read_settings(pool).await;
     let tz = jiff::tz::TimeZone::system();
     let today = jiff::Timestamp::from_millisecond(now_ms)?.to_zoned(tz.clone()).date();
@@ -851,7 +863,7 @@ mod tests {
             task_row("undated", None, false, "needs-action"),
             task_row("done", Some(T0900Z), false, "completed"),
         ];
-        let tasks = assemble_tasks(&rows, T0900Z);
+        let tasks = assemble_tasks(&rows, T0900Z, &jiff::tz::TimeZone::UTC);
         let titles: Vec<&str> = tasks.iter().map(|t| t.title.as_str()).collect();
         assert_eq!(titles, vec!["overdue", "soon"], "far, undated and done stay out");
         assert!(tasks[0].overdue);
@@ -865,12 +877,35 @@ mod tests {
     fn an_all_day_due_is_not_overdue_during_its_day() {
         let midnight = T0900Z - 9 * HOUR;
         let rows = vec![task_row("today", Some(midnight), true, "needs-action")];
-        let tasks = assemble_tasks(&rows, T0900Z);
+        let tasks = assemble_tasks(&rows, T0900Z, &jiff::tz::TimeZone::UTC);
         assert_eq!(tasks.len(), 1);
         assert!(!tasks[0].overdue);
         // And once its day has ended, it is.
-        let after = assemble_tasks(&rows, midnight + 25 * HOUR);
+        let after = assemble_tasks(&rows, midnight + 25 * HOUR, &jiff::tz::TimeZone::UTC);
         assert!(after[0].overdue);
+    }
+
+    /// A New York list's Thursday is Thursday in the bar in Sofia: its due is
+    /// Sofia's midnight, and it is late only after Sofia's Thursday ends —
+    /// including the day the clocks go back, which is 25 hours long.
+    #[test]
+    fn an_all_day_due_is_its_date_in_the_display_zone() {
+        let sofia = jiff::tz::TimeZone::get("Europe/Sofia").unwrap();
+        let ms = |s: &str| s.parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        let mut row = task_row("thursday", Some(ms("2026-09-17T04:00:00Z")), true, "needs-action");
+        row.task.due_tz = Some("America/New_York".into());
+        let tasks = assemble_tasks(&[row], ms("2026-09-17T10:00:00Z"), &sofia);
+        assert_eq!(tasks[0].due_ms, ms("2026-09-16T21:00:00Z"), "Thursday's midnight in Sofia");
+        assert!(!tasks[0].overdue);
+
+        // Sun 25 Oct 2026 in Sofia runs 00:00+03:00 to 00:00+02:00 the next day.
+        let row = task_row("clocks", Some(ms("2026-10-24T21:00:00Z")), true, "needs-action");
+        let mut row = row;
+        row.task.due_tz = Some("Europe/Sofia".into());
+        let late_evening = ms("2026-10-25T21:30:00Z"); // 23:30 local, still Sunday
+        assert!(!assemble_tasks(std::slice::from_ref(&row), late_evening, &sofia)[0].overdue);
+        let monday = ms("2026-10-25T22:00:00Z"); // 00:00 Monday local
+        assert!(assemble_tasks(&[row], monday, &sofia)[0].overdue);
     }
 
     #[test]

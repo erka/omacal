@@ -215,7 +215,7 @@ pub(crate) async fn dispatch(state: &AppState, req: Request) -> serde_json::Valu
                     None => {
                         return fail_env(
                             "refused",
-                            "no task list to add to — task lists arrive with an iCloud or CalDAV account",
+                            "no task list to add to — make one in the Tasks pane (\"Create a list on this device\") or connect an iCloud or CalDAV account",
                         );
                     }
                 },

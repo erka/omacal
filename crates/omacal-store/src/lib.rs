@@ -26,7 +26,7 @@ pub use invites::{
 };
 pub use reminders::{fired_keys, prune_fired, record_fired};
 pub use tasks::{
-    delete_task, delete_tasks_not_in, mark_task_status, task_by_id, tasks_for_ui,
+    completed_tasks_for_ui, delete_task, delete_tasks_not_in, mark_task_status, task_by_id, tasks_for_ui,
     update_task_fields, upsert_task,
     StoredTask, TaskRow,
 };

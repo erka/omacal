@@ -1721,6 +1721,7 @@ pub fn run() {
             accounts::list_accounts,
             accounts::sign_out,
             tasks::list_tasks,
+            tasks::search_done_tasks,
             tasks::set_task_completed,
             tasks::create_task,
             tasks::delete_task_cmd,

@@ -10,7 +10,7 @@ import type { Task } from '../src/lib/tasks';
  */
 const task = (over: Partial<Task> = {}): Task => ({
   id: 1, calendarId: 1, summary: 'x', notes: null, dueMs: null, dueAllDay: true,
-  completed: false, calendar: 'Work', color: '#2dd4bf', priority: 0, canWrite: true, ...over,
+  completed: false, completedMs: null, calendar: 'Work', color: '#2dd4bf', priority: 0, canWrite: true, ...over,
 });
 const NOW = new Date(2026, 8, 9, 10, 0).getTime(); // Wed 9 Sep 2026
 const on = (day: number, hour = 9) => new Date(2026, 8, day, hour, 0).getTime();

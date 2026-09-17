@@ -18,7 +18,8 @@
   import ImportPanel from './lib/ImportPanel.svelte';
   import TasksSidebar from './lib/TasksSidebar.svelte';
   import { taskChips } from './lib/taskchips';
-  import { listTasks, setTaskCompleted, taskLists, updateTask, type Task, type TaskList } from './lib/tasks';
+  import { setTaskCompleted, updateTask } from './lib/tasks';
+  import { refreshTasks, setTaskRows, taskListRows, taskRows } from './lib/taskstore.svelte';
   import { isIcs } from './lib/importics';
   import { changedMeetings, declinedGuests, pendingInvites } from './lib/invites';
   import { calendarColor, getCalendars, offerableCalendarId, setCalendarSelected, type Calendar } from './lib/calendars';
@@ -197,9 +198,13 @@
   // they put it: only an anchor that matched the previously-current day moves
   // with the clock.
   let trackedTodayMs = dayStart(Date.now());
+  /** Today, as state: what an overdue task is filed under changes at
+   *  midnight, and a window left open overnight must move it. */
+  let today = $state(dayStart(Date.now()));
   $effect(() => {
     const snap = () => {
       const next = dayStart(Date.now());
+      today = next;
       if (weekStartsToday && anchorMs === trackedTodayMs && next !== trackedTodayMs) {
         anchorMs = next;
       }
@@ -340,23 +345,21 @@
    *  due Thursday belongs on Thursday either way, and a row that appeared
    *  only while a panel was open would be a panel's decoration rather than
    *  part of the week. */
-  let taskRows = $state<Task[]>([]);
-  let taskListRows = $state<TaskList[]>([]);
-  const weekTasks = $derived(taskChips(taskRows, Date.now(), taskListRows));
-  async function refreshTasks() {
-    try {
-      const [t, l] = await Promise.all([listTasks(), taskLists()]);
-      taskRows = t;
-      taskListRows = l;
-    } catch { /* tasks are a side panel; a failure leaves the last set */ }
-  }
-  $effect(() => { void refreshTasks(); });
+  /** Read from `taskstore`, which the sidebar writes to as well: one copy,
+   *  so a task ticked off in either place is ticked off in both. */
+  const weekTasks = $derived.by(() => {
+    void today; // re-filed at midnight: yesterday's due becomes overdue on today
+    return taskChips(taskRows() ?? [], Date.now(), taskListRows());
+  });
+  /** Tasks are a side panel: a failure leaves the last set on the grid. */
+  const reloadTasks = () => refreshTasks().catch(() => {});
+  $effect(() => { void reloadTasks(); });
 
   /** A chip dragged to another column. The grid says which day; what a due
    *  date *becomes* is decided here, because only this side knows whether
    *  the task had an hour worth keeping. */
   async function moveTask(id: number, dayStartMs: number) {
-    const task = taskRows.find((t) => t.id === id);
+    const task = taskRows()?.find((t) => t.id === id);
     if (!task) return;
     const at = new Date(dayStartMs);
     let dueMs = at.getTime();
@@ -368,7 +371,7 @@
       dueMs = at.getTime();
     }
     try {
-      taskRows = await updateTask(id, task.summary, dueMs, task.dueAllDay, task.notes);
+      setTaskRows(await updateTask(id, task.summary, dueMs, task.dueAllDay, task.notes));
     } catch (e) {
       error = String(e);
     }
@@ -377,10 +380,10 @@
   /** A task drawn at its hour, dragged to another time. The grid has
    *  already snapped the instant; a task that had an hour still has one. */
   async function retimeTask(id: number, dueMs: number) {
-    const task = taskRows.find((t) => t.id === id);
+    const task = taskRows()?.find((t) => t.id === id);
     if (!task) return;
     try {
-      taskRows = await updateTask(id, task.summary, dueMs, false, task.notes);
+      setTaskRows(await updateTask(id, task.summary, dueMs, false, task.notes));
     } catch (e) {
       error = String(e);
     }
@@ -388,7 +391,7 @@
 
   async function completeTask(id: number, done: boolean) {
     try {
-      taskRows = await setTaskCompleted(id, done);
+      setTaskRows(await setTaskCompleted(id, done));
     } catch (e) {
       error = String(e);
     }
@@ -1099,6 +1102,10 @@
       await refreshStatus();
       await refreshInvites();
       await reload();
+      // A sync brings tasks too — one completed on the phone, one added on
+      // the server — and the grid and the sidebar would otherwise keep
+      // showing the list as it was when the window opened.
+      await reloadTasks();
     });
     return () => { un.then((f) => f()); };
   });
@@ -2131,7 +2138,6 @@
   <div class="workspace">
     {#if tasksOpen}
       <TasksSidebar onclose={() => (tasksOpen = false)}
-                    onchange={() => { void refreshTasks(); }}
                     width={tasksWidth}
                     onresize={(px) => (tasksWidth = px)} />
     {/if}

@@ -703,17 +703,19 @@ fn print_rows_human(rows: &[Row]) {
 
 /// One task, as an agent consumes it. `due` is RFC 3339 in the display
 /// zone when the task has a time, and a bare date when it does not — the
-/// distinction the app stores, kept rather than flattened.
-fn task_json(row: &omacal_store::TaskRow) -> serde_json::Value {
+/// distinction the app stores, kept rather than flattened. `dueMs` is the
+/// window's own reading of it (`tasks::display_due_ms`), and `overdue` is the
+/// sidebar's: a task due today is due today all day, not late at 00:01.
+fn task_json(row: &omacal_store::TaskRow, now_ms: i64, tz: &jiff::tz::TimeZone) -> serde_json::Value {
     let t = &row.task;
     serde_json::json!({
         "id": t.id,
         "summary": t.summary.clone().unwrap_or_default(),
         "notes": t.description,
-        "due": t.due_utc.map(|ms| due_wire(ms, t.due_all_day)),
-        "dueMs": t.due_utc,
+        "due": due_wire(t, tz),
+        "dueMs": crate::tasks::display_due_ms(t, tz),
         "dueAllDay": t.due_all_day,
-        "overdue": t.due_utc.is_some_and(|ms| ms < crate::now_ms()) && t.status != "completed",
+        "overdue": task_overdue(t, now_ms, tz),
         "completed": t.status == "completed",
         "list": row.calendar_summary,
         "listId": t.calendar_id,
@@ -721,30 +723,57 @@ fn task_json(row: &omacal_store::TaskRow) -> serde_json::Value {
     })
 }
 
-/// A due date on the wire: a bare date when the task has no hour, and an
-/// instant when it has one.
-fn due_wire(ms: i64, all_day: bool) -> String {
-    let z = jiff::Timestamp::from_millisecond(ms)
+/// A due date on the wire: the date an all-day due names, and an instant
+/// with its display-zone offset when it has an hour.
+///
+/// Both used to go through the instant: an all-day due read in the display
+/// zone named the day before for a list east of it, and a timed one printed
+/// as UTC (`…Z`), which `task_lines` then cut at the `T` — a Sofia task due
+/// at 01:30 printed as the day before (found 2026-09-17).
+fn due_wire(t: &omacal_store::StoredTask, tz: &jiff::tz::TimeZone) -> Option<String> {
+    let ms = t.due_utc?;
+    if t.due_all_day {
+        return Some(crate::tasks::due_date(ms, t.due_tz.as_deref()).to_string());
+    }
+    jiff::Timestamp::from_millisecond(ms)
+        .ok()
+        .map(|ts| ts.to_zoned(tz.clone()).strftime("%Y-%m-%dT%H:%M:%S%:z").to_string())
+}
+
+/// Whether a task is late, as the sidebar says it: an all-day task only
+/// once its date is behind today, a timed one once its instant has passed,
+/// and a completed one never.
+fn task_overdue(t: &omacal_store::StoredTask, now_ms: i64, tz: &jiff::tz::TimeZone) -> bool {
+    let Some(ms) = t.due_utc else { return false };
+    if t.status == "completed" {
+        return false;
+    }
+    if !t.due_all_day {
+        return ms < now_ms;
+    }
+    let today = jiff::Timestamp::from_millisecond(now_ms)
         .unwrap_or(jiff::Timestamp::UNIX_EPOCH)
-        .to_zoned(jiff::tz::TimeZone::system());
-    if all_day { z.date().to_string() } else { z.timestamp().to_string() }
+        .to_zoned(tz.clone())
+        .date();
+    crate::tasks::due_date(ms, t.due_tz.as_deref()) < today
 }
 
 /// The tasks as a person reads them: what is late first, then what is due,
 /// then what has no date — the order somebody actually works in.
-pub(crate) fn task_lines(rows: &[&omacal_store::TaskRow], now_ms: i64) -> Vec<String> {
+pub(crate) fn task_lines(rows: &[&omacal_store::TaskRow], now_ms: i64, tz: &jiff::tz::TimeZone) -> Vec<String> {
     let mut out = Vec::new();
     let mut sorted: Vec<&&omacal_store::TaskRow> = rows.iter().collect();
-    sorted.sort_by_key(|r| (r.task.due_utc.is_none(), r.task.due_utc.unwrap_or(i64::MAX)));
+    sorted.sort_by_key(|r| {
+        let due = crate::tasks::display_due_ms(&r.task, tz);
+        (due.is_none(), due.unwrap_or(i64::MAX))
+    });
     for r in sorted {
         let t = &r.task;
-        let when = match t.due_utc {
+        let when = match due_wire(t, tz) {
             None => "        ".to_string(),
-            Some(ms) => {
-                let overdue = ms < now_ms && t.status != "completed";
-                let d = due_wire(ms, t.due_all_day);
+            Some(d) => {
                 let d = d.split('T').next().unwrap_or(&d).to_string();
-                if overdue { format!("{d} !") } else { format!("{d}  ") }
+                if task_overdue(t, now_ms, tz) { format!("{d} !") } else { format!("{d}  ") }
             }
         };
         let mark = if t.status == "completed" { "x" } else { " " };
@@ -963,12 +992,13 @@ pub(crate) fn run(inv: Invocation) -> i32 {
                         .iter()
                         .filter(|r| *all || r.task.status != "completed")
                         .collect();
+                    let tz = jiff::tz::TimeZone::system();
                     if inv.json {
-                        print_json(&open.iter().map(|r| task_json(r)).collect::<Vec<_>>());
+                        print_json(&open.iter().map(|r| task_json(r, crate::now_ms(), &tz)).collect::<Vec<_>>());
                     } else if open.is_empty() {
                         println!("Nothing to do.");
                     } else {
-                        for line in task_lines(&open, crate::now_ms()) {
+                        for line in task_lines(&open, crate::now_ms(), &tz) {
                             println!("{line}");
                         }
                     }
@@ -1265,6 +1295,61 @@ mod doctor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stored_task(due_utc: Option<i64>, due_tz: &str, all_day: bool) -> omacal_store::TaskRow {
+        omacal_store::TaskRow {
+            task: omacal_store::StoredTask {
+                id: 7, calendar_id: 1, uid: "u".into(), etag: None, caldav_href: None,
+                summary: Some("Renew the domain".into()), description: None, due_utc,
+                due_tz: Some(due_tz.into()), due_all_day: all_day, status: "needs-action".into(),
+                completed_utc: None, priority: 0, updated_at: 0, raw_ics: None,
+            },
+            calendar_summary: "Work".into(),
+            color_hex: None,
+            access_role: "owner".into(),
+        }
+    }
+    fn at(s: &str) -> i64 {
+        s.parse::<jiff::Timestamp>().unwrap().as_millisecond()
+    }
+
+    /// The sidebar says "Today" for a task due today, all day; the CLI said
+    /// "overdue" from 00:01 (found 2026-09-17), and SKILL.md tells agents to
+    /// trust `overdue`.
+    #[test]
+    fn a_task_due_today_all_day_is_not_overdue_until_tomorrow() {
+        let sofia = jiff::tz::TimeZone::get("Europe/Sofia").unwrap();
+        // DUE;VALUE=DATE:20260917 on a Sofia list: midnight there.
+        let row = stored_task(Some(at("2026-09-16T21:00:00Z")), "Europe/Sofia", true);
+        let evening = at("2026-09-17T15:00:00Z");
+        let j = task_json(&row, evening, &sofia);
+        assert_eq!(j["due"], "2026-09-17");
+        assert_eq!(j["overdue"], false, "due today is not late");
+        let next_day = at("2026-09-17T21:30:00Z");
+        assert_eq!(task_json(&row, next_day, &sofia)["overdue"], true, "the day after, it is");
+        // A timed one is late the moment its hour passes.
+        let timed = stored_task(Some(at("2026-09-17T07:00:00Z")), "Europe/Sofia", false);
+        assert_eq!(task_json(&timed, evening, &sofia)["overdue"], true);
+        assert_eq!(task_json(&timed, at("2026-09-17T06:00:00Z"), &sofia)["overdue"], false);
+    }
+
+    /// Dates in the zone they were written in, times in the display zone
+    /// with its offset — never a UTC stamp cut to the wrong day.
+    #[test]
+    fn a_due_prints_the_day_the_user_meant() {
+        let sofia = jiff::tz::TimeZone::get("Europe/Sofia").unwrap();
+        // A New York list's Thursday, read from Sofia: still Thursday.
+        let ny = stored_task(Some(at("2026-09-17T04:00:00Z")), "America/New_York", true);
+        let j = task_json(&ny, at("2026-09-16T09:00:00Z"), &sofia);
+        assert_eq!(j["due"], "2026-09-17");
+        assert_eq!(j["dueMs"], at("2026-09-16T21:00:00Z"), "Thursday's midnight where the reader is");
+        // 01:30 in Sofia on the 18th is 22:30 UTC on the 17th.
+        let late = stored_task(Some(at("2026-09-17T22:30:00Z")), "Europe/Sofia", false);
+        let j = task_json(&late, at("2026-09-16T09:00:00Z"), &sofia);
+        assert_eq!(j["due"], "2026-09-18T01:30:00+03:00");
+        let lines = task_lines(&[&late], at("2026-09-16T09:00:00Z"), &sofia);
+        assert!(lines[0].contains("2026-09-18"), "the line names the 18th: {}", lines[0]);
+    }
 
     fn argv(s: &str) -> Vec<String> {
         std::iter::once("omacal".to_string())
