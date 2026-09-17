@@ -17,6 +17,7 @@
   import { clockFormat } from './clock.svelte';
   import { displayClock, parseClock } from './timefmt';
   import { openingSlot, slotAtOrBefore, stepSlot, timeSlots } from './timepicker';
+  import { dropdown } from './dropdown';
 
   let {
     label,
@@ -51,6 +52,7 @@
   const uid = `tf${Math.random().toString(36).slice(2, 8)}`;
   let input: HTMLInputElement | undefined = $state();
   let list: HTMLDivElement | undefined = $state();
+  let field: HTMLSpanElement | undefined = $state();
 
   /** What the field shows: the value in the app's clock, or what is being
    *  typed over it. */
@@ -140,7 +142,7 @@
   }
 </script>
 
-<span class="timefield" class:open>
+<span class="timefield" class:open bind:this={field}>
   <input
     bind:this={input}
     type="text"
@@ -199,7 +201,7 @@
     <button class="scrim" tabindex="-1" aria-label="Close {label.toLowerCase()} list"
             onclick={() => (open = false)}></button>
     <div class="list quiet-scroll" id="{uid}-list" role="listbox" aria-label="{label} options"
-         bind:this={list}>
+         bind:this={list} use:dropdown={field}>
       {#each slots as slot (slot)}
         <!-- `pointerdown` kept from the input: the field keeps the focus,
              so the caret and the keyboard stay where the hand left them. -->
@@ -244,7 +246,8 @@
 
   .scrim { position: fixed; inset: 0; z-index: -1; background: none; border: 0;
            padding: 0; cursor: default; }
-  .list { position: absolute; top: calc(100% + 4px); left: 0; z-index: 1;
+  /* Fixed and placed by `dropdown`, for `DateField`'s calendar's reason. */
+  .list { position: fixed; top: 0; left: 0; z-index: 1;
           display: flex; flex-direction: column; min-width: 100px; max-height: 216px;
           overflow-y: auto; background: var(--surface); border: 1px solid var(--hairline);
           border-radius: 8px; padding: 4px; box-shadow: 0 6px 20px #0005; }

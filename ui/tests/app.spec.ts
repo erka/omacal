@@ -6230,6 +6230,61 @@ test.describe('the task time field', () => {
     await expect.poll(() => lastUpdate(page)).toMatchObject({ dueMs: APP_MON, dueAllDay: true });
   });
 
+  /** Reported 2026-09-17 with a screenshot: in a narrowed pane the date
+   *  calendar ran into the pane's edge and its last days were cut off. A
+   *  point near a popup's far edge must land on the popup, not on the week. */
+  test('the calendar and the time list are whole in the narrowest pane', async ({ page }) => {
+    await page.addInitScript(() =>
+      sessionStorage.setItem('omacal-stub-settings', JSON.stringify({ tasksWidth: 220 })));
+    const side = await editor(page, 'Ship the release');
+    const reachable = async (popup: ReturnType<Page['getByRole']>) => {
+      const b = (await popup.boundingBox())!;
+      const points = [[b.x + b.width - 6, b.y + b.height / 2], [b.x + 6, b.y + b.height - 6]];
+      return page.evaluate(([pts, role]) => pts.every(([x, y]) =>
+        (document.elementFromPoint(x, y) as HTMLElement | null)?.closest(`[role=${role}]`) !== null),
+      [points, (await popup.getAttribute('role'))!] as const);
+    };
+
+    await side.getByRole('button', { name: 'Pick due date' }).click();
+    const cal = page.getByRole('dialog', { name: 'Due date chooser' });
+    await expect(cal).toBeVisible();
+    const paneRight = (await side.boundingBox())!.x + 220;
+    expect((await cal.boundingBox())!.x + (await cal.boundingBox())!.width).toBeGreaterThan(paneRight);
+    expect(await reachable(cal)).toBe(true);
+    // And still a working calendar out there: its last column picks a day.
+    await cal.getByRole('gridcell', { name: '2024-02-04' }).click();
+    await expect(side.getByRole('textbox', { name: 'Due date' })).toHaveValue('2024-02-04');
+
+    await time(side).click();
+    const list = side.getByRole('listbox', { name: 'Due time options' });
+    await expect(list).toBeVisible();
+    expect(await reachable(list)).toBe(true);
+  });
+
+  /** Drawn fixed, a popup has to follow its field when the pane scrolls
+   *  under it rather than stay behind where the field was. */
+  test('an open calendar follows its field when the pane scrolls', async ({ page }) => {
+    await page.setViewportSize({ width: 1000, height: 460 });
+    await page.clock.setFixedTime(APP_NOW);
+    await page.goto(app());
+    await page.evaluate(() => (window as any).__harness.seedDoneHistory(0));
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Tasks…' }).click();
+    const side = page.getByRole('complementary', { name: 'Tasks' });
+    await side.getByRole('button', { name: 'Buy milk' }).click();
+    await side.getByRole('button', { name: 'Pick due date' }).click();
+    const cal = page.getByRole('dialog', { name: 'Due date chooser' });
+    await expect(cal).toBeVisible();
+    const field = side.getByRole('textbox', { name: 'Due date' });
+    const gap = async () => (await cal.boundingBox())!.y - (await field.boundingBox())!.y;
+    const before = await gap();
+    const moved = await field.boundingBox();
+    await side.locator('.rows').evaluate((el) => { el.scrollTop = 40; });
+    // The premise: the pane really scrolled, and the field moved with it.
+    await expect.poll(async () => (await field.boundingBox())!.y).toBeLessThan(moved!.y - 20);
+    await expect.poll(async () => Math.round(await gap())).toBe(Math.round(before));
+  });
+
   test('Escape closes the list and leaves the editor open', async ({ page }) => {
     const side = await editor(page, 'Ship the release');
     await time(side).click();

@@ -14,6 +14,7 @@
      whether 06/09 means June or September. -->
 <script lang="ts">
   import { weekStartDay } from './weekstartstore.svelte';
+  import { dropdown } from './dropdown';
   import {
     addDays, addMonths, columnOf, formatYmd, monthGrid, parseYmd, weekdayNames, type Ymd,
   } from './datepicker';
@@ -35,6 +36,7 @@
     onchange?: (v: string) => void;
   } = $props();
   let input: HTMLInputElement | undefined = $state();
+  let field: HTMLSpanElement | undefined = $state();
 
   /** The month on screen, and the day the keyboard is on. Seeded from the
    *  value when there is one and from today when there is not — opening an
@@ -84,7 +86,7 @@
   }
 </script>
 
-<span class="datefield">
+<span class="datefield" bind:this={field}>
   <input
     bind:this={input}
     {id}
@@ -133,7 +135,7 @@
     <!-- A sibling of the panel, never a wrapper — `CalendarPicker`'s shape,
          and the thing the platform's popup would never let us have. -->
     <button class="scrim" aria-label="Close {label.toLowerCase()} chooser" onclick={() => (open = false)}></button>
-    <div class="cal" role="dialog" aria-label="{label} chooser">
+    <div class="cal" role="dialog" aria-label="{label} chooser" use:dropdown={field}>
       <div class="head">
         <button type="button" aria-label="Previous month" onclick={() => (cursor = addMonths(cursor, -1))}>‹</button>
         <span aria-live="polite">{monthLabel}</span>
@@ -189,7 +191,10 @@
      the whole point of owning it. */
   .scrim { position: fixed; inset: 0; z-index: 40; background: none; border: 0;
            padding: 0; cursor: default; }
-  .cal { position: absolute; top: calc(100% + 4px); left: 0; z-index: 41;
+  /* Fixed and placed by `dropdown`, not absolute under the field: inside the
+     Tasks pane's scrolling rows an absolute calendar wider than the pane was
+     cut off at its edge (reported 2026-09-17). */
+  .cal { position: fixed; top: 0; left: 0; z-index: 41;
          background: var(--surface); border: 1px solid var(--hairline);
          border-radius: 8px; padding: 8px; box-shadow: 0 6px 20px #0005; }
   .head { display: flex; align-items: center; justify-content: space-between; gap: 8px;

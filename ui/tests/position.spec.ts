@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { placePopover } from '../src/lib/position';
+import { placeDropdown, placePopover } from '../src/lib/position';
 
 const VIEW = { width: 1200, height: 800 };
 const POP = { width: 320, height: 400 };
@@ -41,5 +41,36 @@ test.describe('placePopover', () => {
     const p = placePopover({ top: 100, left: 200, width: 120, height: 40 },
                            { width: 1300, height: 400 }, VIEW);
     expect(p.left).toBe(8);
+  });
+});
+
+/**
+ * `placeDropdown`: the date calendar and the time list, drawn fixed so the
+ * Tasks pane's scrolling rows cannot clip them (2026-09-17).
+ */
+test.describe('placeDropdown', () => {
+  const VIEW = { width: 1000, height: 700 };
+  const CAL = { width: 226, height: 219 };
+  const field = (left: number, top: number) => ({ left, top, width: 150, height: 26 });
+
+  test('opens under the field, left-aligned with it', () => {
+    expect(placeDropdown(field(40, 300), CAL, VIEW)).toEqual({ top: 330, left: 40 });
+  });
+
+  test('opens above when there is no room below and room above', () => {
+    expect(placeDropdown(field(40, 600), CAL, VIEW)).toEqual({ top: 600 - 4 - 219, left: 40 });
+  });
+
+  test('stays below, pulled up into the window, when neither side has room', () => {
+    const short = { width: 1000, height: 300 };
+    expect(placeDropdown(field(40, 60), CAL, short)).toEqual({ top: 300 - 219 - 8, left: 40 });
+  });
+
+  test('is pulled back inside the right edge', () => {
+    expect(placeDropdown(field(900, 100), CAL, VIEW).left).toBe(1000 - 226 - 8);
+  });
+
+  test('a popup wider than the window pins to its left margin', () => {
+    expect(placeDropdown(field(100, 100), { width: 1200, height: 100 }, VIEW).left).toBe(8);
   });
 });
