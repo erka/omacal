@@ -374,6 +374,18 @@
     }
   }
 
+  /** A task drawn at its hour, dragged to another time. The grid has
+   *  already snapped the instant; a task that had an hour still has one. */
+  async function retimeTask(id: number, dueMs: number) {
+    const task = taskRows.find((t) => t.id === id);
+    if (!task) return;
+    try {
+      taskRows = await updateTask(id, task.summary, dueMs, false, task.notes);
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   async function completeTask(id: number, done: boolean) {
     try {
       taskRows = await setTaskCompleted(id, done);
@@ -2170,7 +2182,7 @@
         <WeekGrid {week} {visibleStartMs} visibleDays={visibleCount}
                   onerror={(m) => (error = m)}
                   {weather} {weatherStale} onweather={openWeather}
-                  tasks={weekTasks} ontaskmove={moveTask} ontasktoggle={completeTask}
+                  tasks={weekTasks} ontaskmove={moveTask} ontaskdue={retimeTask} ontasktoggle={completeTask}
                   {formPreview} {createColor} {revealNowRequest} bind:hourPx
                   keyboardCursor={visibleKeyboardCursor}
                   onpan={panView}

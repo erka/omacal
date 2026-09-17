@@ -1,0 +1,365 @@
+[
+  {
+    "name": "disjoint",
+    "day_start_ms": 0,
+    "day_end_ms": 86400000,
+    "spans": [
+      [
+        32400000,
+        36000000
+      ],
+      [
+        39600000,
+        43200000
+      ]
+    ],
+    "placed": [
+      {
+        "idx": 0,
+        "column": 0,
+        "columns": 1,
+        "top": 0.375,
+        "height": 0.041666668
+      },
+      {
+        "idx": 1,
+        "column": 0,
+        "columns": 1,
+        "top": 0.45833334,
+        "height": 0.041666668
+      }
+    ]
+  },
+  {
+    "name": "identical",
+    "day_start_ms": 0,
+    "day_end_ms": 86400000,
+    "spans": [
+      [
+        36000000,
+        39600000
+      ],
+      [
+        36000000,
+        39600000
+      ]
+    ],
+    "placed": [
+      {
+        "idx": 0,
+        "column": 0,
+        "columns": 2,
+        "top": 0.41666666,
+        "height": 0.041666668
+      },
+      {
+        "idx": 1,
+        "column": 1,
+        "columns": 2,
+        "top": 0.41666666,
+        "height": 0.041666668
+      }
+    ]
+  },
+  {
+    "name": "partial overlap",
+    "day_start_ms": 0,
+    "day_end_ms": 86400000,
+    "spans": [
+      [
+        36000000,
+        39600000
+      ],
+      [
+        37800000,
+        41400000
+      ]
+    ],
+    "placed": [
+      {
+        "idx": 0,
+        "column": 0,
+        "columns": 2,
+        "top": 0.41666666,
+        "height": 0.041666668
+      },
+      {
+        "idx": 1,
+        "column": 1,
+        "columns": 2,
+        "top": 0.4375,
+        "height": 0.041666668
+      }
+    ]
+  },
+  {
+    "name": "three-way pile",
+    "day_start_ms": 0,
+    "day_end_ms": 86400000,
+    "spans": [
+      [
+        36000000,
+        43200000
+      ],
+      [
+        37800000,
+        39600000
+      ],
+      [
+        38700000,
+        41400000
+      ]
+    ],
+    "placed": [
+      {
+        "idx": 0,
+        "column": 0,
+        "columns": 3,
+        "top": 0.41666666,
+        "height": 0.083333336
+      },
+      {
+        "idx": 1,
+        "column": 1,
+        "columns": 3,
+        "top": 0.4375,
+        "height": 0.020833334
+      },
+      {
+        "idx": 2,
+        "column": 2,
+        "columns": 3,
+        "top": 0.44791666,
+        "height": 0.03125
+      }
+    ]
+  },
+  {
+    "name": "a gap starts a new cluster",
+    "day_start_ms": 0,
+    "day_end_ms": 86400000,
+    "spans": [
+      [
+        32400000,
+        36000000
+      ],
+      [
+        34200000,
+        36000000
+      ],
+      [
+        50400000,
+        54000000
+      ]
+    ],
+    "placed": [
+      {
+        "idx": 0,
+        "column": 0,
+        "columns": 2,
+        "top": 0.375,
+        "height": 0.041666668
+      },
+      {
+        "idx": 1,
+        "column": 1,
+        "columns": 2,
+        "top": 0.39583334,
+        "height": 0.020833334
+      },
+      {
+        "idx": 2,
+        "column": 0,
+        "columns": 1,
+        "top": 0.5833333,
+        "height": 0.041666668
+      }
+    ]
+  },
+  {
+    "name": "touching",
+    "day_start_ms": 0,
+    "day_end_ms": 86400000,
+    "spans": [
+      [
+        32400000,
+        36000000
+      ],
+      [
+        36000000,
+        39600000
+      ]
+    ],
+    "placed": [
+      {
+        "idx": 0,
+        "column": 0,
+        "columns": 1,
+        "top": 0.375,
+        "height": 0.041666668
+      },
+      {
+        "idx": 1,
+        "column": 0,
+        "columns": 1,
+        "top": 0.41666666,
+        "height": 0.041666668
+      }
+    ]
+  },
+  {
+    "name": "clamped to the window",
+    "day_start_ms": 0,
+    "day_end_ms": 86400000,
+    "spans": [
+      [
+        -7200000,
+        7200000
+      ],
+      [
+        82800000,
+        93600000
+      ]
+    ],
+    "placed": [
+      {
+        "idx": 0,
+        "column": 0,
+        "columns": 1,
+        "top": 0.0,
+        "height": 0.083333336
+      },
+      {
+        "idx": 1,
+        "column": 0,
+        "columns": 1,
+        "top": 0.9583333,
+        "height": 0.041666668
+      }
+    ]
+  },
+  {
+    "name": "zero length",
+    "day_start_ms": 0,
+    "day_end_ms": 86400000,
+    "spans": [
+      [
+        32400000,
+        32400000
+      ]
+    ],
+    "placed": [
+      {
+        "idx": 0,
+        "column": 0,
+        "columns": 1,
+        "top": 0.375,
+        "height": 0.004
+      }
+    ]
+  },
+  {
+    "name": "a short span inside a meeting",
+    "day_start_ms": 0,
+    "day_end_ms": 86400000,
+    "spans": [
+      [
+        39600000,
+        43200000
+      ],
+      [
+        41400000,
+        42480000
+      ]
+    ],
+    "placed": [
+      {
+        "idx": 0,
+        "column": 0,
+        "columns": 2,
+        "top": 0.45833334,
+        "height": 0.041666668
+      },
+      {
+        "idx": 1,
+        "column": 1,
+        "columns": 2,
+        "top": 0.47916666,
+        "height": 0.0125
+      }
+    ]
+  },
+  {
+    "name": "longest first whatever the order",
+    "day_start_ms": 0,
+    "day_end_ms": 86400000,
+    "spans": [
+      [
+        36000000,
+        37080000
+      ],
+      [
+        36000000,
+        43200000
+      ],
+      [
+        36720000,
+        37800000
+      ]
+    ],
+    "placed": [
+      {
+        "idx": 0,
+        "column": 1,
+        "columns": 3,
+        "top": 0.41666666,
+        "height": 0.0125
+      },
+      {
+        "idx": 1,
+        "column": 0,
+        "columns": 3,
+        "top": 0.41666666,
+        "height": 0.083333336
+      },
+      {
+        "idx": 2,
+        "column": 2,
+        "columns": 3,
+        "top": 0.425,
+        "height": 0.0125
+      }
+    ]
+  },
+  {
+    "name": "a 25-hour day",
+    "day_start_ms": 0,
+    "day_end_ms": 90000000,
+    "spans": [
+      [
+        3600000,
+        10800000
+      ],
+      [
+        7200000,
+        8279999
+      ]
+    ],
+    "placed": [
+      {
+        "idx": 0,
+        "column": 0,
+        "columns": 2,
+        "top": 0.04,
+        "height": 0.08
+      },
+      {
+        "idx": 1,
+        "column": 1,
+        "columns": 2,
+        "top": 0.08,
+        "height": 0.011999989
+      }
+    ]
+  }
+]

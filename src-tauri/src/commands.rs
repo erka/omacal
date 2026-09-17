@@ -1625,6 +1625,57 @@ mod tests {
         assert_eq!(w.days[0].start_ms, week_start, "the file's columns are Sofia midnights");
     }
 
+    /// `lay_out_day` as the UI's port of it must answer (`ui/src/lib/daylayout.ts`,
+    /// which lays out a day holding a timed task among its events — tasks are
+    /// the page's own state, not part of this payload). Each case carries its
+    /// inputs beside the geometry, so `daylayout.spec.ts` can run the port on
+    /// exactly these and compare. The cases are `layout.rs`'s own shapes plus
+    /// the ones a task brings: a short span inside a meeting, and one ending
+    /// where the next begins.
+    #[test]
+    fn the_day_layout_golden_file_is_what_lay_out_day_produces() {
+        #[derive(serde::Serialize)]
+        struct Case {
+            name: &'static str,
+            day_start_ms: i64,
+            day_end_ms: i64,
+            spans: Vec<[i64; 2]>,
+            placed: Vec<Placed>,
+        }
+        const HOUR: i64 = 3_600_000;
+        let h = |a: f64, b: f64| [(a * HOUR as f64) as i64, (b * HOUR as f64) as i64];
+        let shapes: Vec<(&'static str, i64, Vec<[i64; 2]>)> = vec![
+            ("disjoint", 24, vec![h(9.0, 10.0), h(11.0, 12.0)]),
+            ("identical", 24, vec![h(10.0, 11.0), h(10.0, 11.0)]),
+            ("partial overlap", 24, vec![h(10.0, 11.0), h(10.5, 11.5)]),
+            ("three-way pile", 24, vec![h(10.0, 12.0), h(10.5, 11.0), h(10.75, 11.5)]),
+            ("a gap starts a new cluster", 24, vec![h(9.0, 10.0), h(9.5, 10.0), h(14.0, 15.0)]),
+            ("touching", 24, vec![h(9.0, 10.0), h(10.0, 11.0)]),
+            ("clamped to the window", 24, vec![h(-2.0, 2.0), h(23.0, 26.0)]),
+            ("zero length", 24, vec![h(9.0, 9.0)]),
+            ("a short span inside a meeting", 24, vec![h(11.0, 12.0), h(11.5, 11.8)]),
+            ("longest first whatever the order", 24, vec![h(10.0, 10.3), h(10.0, 12.0), h(10.2, 10.5)]),
+            ("a 25-hour day", 25, vec![h(1.0, 3.0), h(2.0, 2.3)]),
+        ];
+        let cases: Vec<Case> = shapes
+            .into_iter()
+            .map(|(name, hours, spans)| {
+                let intervals: Vec<Interval> =
+                    spans.iter().map(|[s, e]| Interval { start_ms: *s, end_ms: *e }).collect();
+                let day_end_ms = hours * HOUR;
+                Case { name, day_start_ms: 0, day_end_ms, placed: lay_out_day(&intervals, 0, day_end_ms), spans }
+            })
+            .collect();
+
+        crate::golden::assert_golden("day-layout", &cases);
+
+        // The claim a task leans on, against the fresh answer: a short span
+        // inside a meeting splits the column rather than covering the meeting.
+        let inside = &cases[8].placed;
+        assert_eq!((inside[0].column, inside[0].columns), (0, 2));
+        assert_eq!((inside[1].column, inside[1].columns), (1, 2));
+    }
+
     /// The shape the defect was reported in, and the one that makes "drawn in
     /// exactly one place" a claim with teeth.
     ///

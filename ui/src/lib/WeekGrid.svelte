@@ -7,7 +7,8 @@
   import { formatTemp } from './temperature';
   import WeatherGlyph from './WeatherGlyph.svelte';
   import { dateKey, type DayWeather } from './weather';
-  import type { TaskChip } from './taskchips';
+  import type { TaskChip, WeekTasks } from './taskchips';
+  import { layOutDay } from './daylayout';
   import { formatClock, gutterLabel, zoneAbbrev, zoneGutterLabel } from './timefmt';
   import { tick, untrack } from 'svelte';
   import { HOUR_PX_DEFAULT, hourPxAfterPinch, hourPxAfterWheel, scrollTopKeeping } from './zoom';
@@ -17,7 +18,7 @@
     packBandLanes, panCommit,
     settleTarget, sliceWeek, springAt, springPlan, velocityOf, visibleIndex, type PanSample,
   } from './weekwindow';
-  import type { Lane, WeekPayload, UiEvent } from './api';
+  import type { Lane, Placed, WeekPayload, UiEvent } from './api';
   import type { Rect } from './position';
   import EventBlock from './EventBlock.svelte';
   import AllDayBand from './AllDayBand.svelte';
@@ -29,7 +30,7 @@
   import { cursorNamesEvent, type KeyboardCursor } from './keyboardnav';
   import { dateOf } from './eventform';
 
-  let { week, weather = null, weatherStale = false, onweather = null, tasks = null, ontaskmove = null, ontasktoggle = null, formPreview = null, createColor = null, revealNowRequest = 0, keyboardCursor = null, onpan = null, hourPx = $bindable(HOUR_PX_DEFAULT), visibleStartMs = null, visibleDays = null, onerror = null, oncreate, oncreateallday, onedit, ondelete, oncopy, onduplicate, onmove, ondraftmove = null, onresponded }: {
+  let { week, weather = null, weatherStale = false, onweather = null, tasks = null, ontaskmove = null, ontaskdue = null, ontasktoggle = null, formPreview = null, createColor = null, revealNowRequest = 0, keyboardCursor = null, onpan = null, hourPx = $bindable(HOUR_PX_DEFAULT), visibleStartMs = null, visibleDays = null, onerror = null, oncreate, oncreateallday, onedit, ondelete, oncopy, onduplicate, onmove, ondraftmove = null, onresponded }: {
     /** Padded since 2026-09-03: `visibleDays` from `visibleStartMs` are what
      *  is on screen, and the days either side are the track's to slide into
      *  under a finger (`weekwindow.ts`). Both null — a standalone mount, a
@@ -56,14 +57,18 @@
      *  stale sky is noticed without opening a card. */
     weatherStale?: boolean;
     /** Tasks due in this week, by the ISO date they fall on (`weather.ts`'s
-     *  `dateKey`). Null or empty draws no row at all: a strip of chrome for
-     *  a week with nothing due is the cost Option B was warned about, and
-     *  it is avoidable. */
-    tasks?: Map<string, TaskChip[]> | null;
+     *  `dateKey`) and by where they are drawn — `taskChips` decides which
+     *  go in the row and which at their hour. A row with nothing in it is
+     *  not drawn at all: a strip of chrome for a week with nothing due is
+     *  the cost Option B was warned about, and it is avoidable. */
+    tasks?: WeekTasks | null;
     /** A task chip was dragged to another day: its id and that day's start.
      *  The grid decides which column, never what a due date becomes — the
      *  hour and the all-day flag are the caller's to keep. */
     ontaskmove?: ((id: number, dayStartMs: number) => void) | null;
+    /** A task drawn at its hour was dragged to another time: its id and the
+     *  instant it now lands on, snapped the way an event's move is. */
+    ontaskdue?: ((id: number, dueMs: number) => void) | null;
     ontasktoggle?: ((id: number, done: boolean) => void) | null;
     /** The sky in a day header was clicked: that day's start and the
      *  glyph's own rect, for App to open the weather card over. Optional —
@@ -492,6 +497,7 @@
       endSweep();
     }
     if (taskDrag) endTaskDrag(false);
+    if (pinDrag) endPinDrag(false);
     if (draftDrag) {
       const origin = draftDrag.origin;
       endDraftDrag();
@@ -757,15 +763,90 @@
       ? drag.landed
       : null;
 
-  /** Whether any visible day has a task due. The row exists only then. */
-  const anyTasks = $derived(
-    renderedDays.some((d) => (tasks?.get(dateKey(d.start_ms))?.length ?? 0) > 0),
-  );
+  /** How tall a task drawn at its hour is: one line, the height a
+   *  15-minute block's title needs. Fixed in pixels rather than minutes, so
+   *  the chip reads the same at every zoom — and it is this height, turned
+   *  back into time, that the task occupies when it shares an hour with a
+   *  meeting, so what is laid out is exactly what is drawn. */
+  const TASK_PIN_PX = 20;
+
+  /** Where `ms` falls in `day`'s column, as the column's own fraction. */
+  const fracOf = (day: { start_ms: number; end_ms: number }, ms: number) =>
+    (ms - day.start_ms) / (day.end_ms - day.start_ms);
+
+  /** The day's timed tasks whose hour is on screen. One outside the visible
+   *  hours would be drawn in the part of the column the crop cuts away —
+   *  a task nobody can see — so it keeps the row instead (`rowTasksFor`). */
+  function pinTasksFor(day: { start_ms: number; end_ms: number }): TaskChip[] {
+    const r = crop(day);
+    return (tasks?.timed.get(dateKey(day.start_ms)) ?? []).filter((c) => {
+      const f = fracOf(day, c.dueMs);
+      return f >= r.start && f < r.start + r.span;
+    });
+  }
+
+  /** What the row draws on `day`: the tasks due on it, and the timed ones
+   *  whose hour the visible hours leave out. */
+  function rowTasksFor(day: { start_ms: number; end_ms: number }): TaskChip[] {
+    const key = dateKey(day.start_ms);
+    const pinned = new Set(pinTasksFor(day).map((c) => c.id));
+    return [
+      ...(tasks?.row.get(key) ?? []),
+      ...(tasks?.timed.get(key) ?? []).filter((c) => !pinned.has(c.id)),
+    ];
+  }
+
+  /** Whether any visible day has something for the row. It exists only then. */
+  const anyTasks = $derived(renderedDays.some((d) => rowTasksFor(d).length > 0));
+
+  type Pin = { chip: TaskChip; placed: Placed };
+
+  /**
+   * Each day's geometry: its events, and the tasks drawn among them.
+   *
+   * A day without a timed task keeps the backend's own `placed`, untouched.
+   * A day with one is laid out again here, events and tasks together, so a
+   * task at 11:30 splits the column with the 11:00 meeting it falls inside
+   * rather than covering its title — `daylayout.ts` is the same function,
+   * held to the Rust one by a golden file. A task's span is its chip's
+   * height turned into time at the current zoom, and is lifted to end at the
+   * last visible hour when it would hang past it, so a task due at 23:50 is
+   * drawn whole at the bottom of the column instead of half-cut by the crop.
+   */
+  const dayLayouts = $derived.by(() => {
+    const out = new Map<number, { placed: Placed[]; pins: Pin[] }>();
+    for (const day of renderedDays) {
+      const chips = pinTasksFor(day);
+      if (chips.length === 0) {
+        out.set(day.start_ms, { placed: day.placed, pins: [] });
+        continue;
+      }
+      const r = crop(day);
+      const dayMs = day.end_ms - day.start_ms;
+      const columnPx = visibleHeight / r.span;
+      const pinMs = columnPx > 0 ? (TASK_PIN_PX / columnPx) * dayMs : SNAP_MS;
+      const lastMs = day.start_ms + (r.start + r.span) * dayMs - pinMs;
+      const spans = [
+        ...day.events.map((e) => ({ startMs: e.start_ms, endMs: e.end_ms })),
+        ...chips.map((c) => {
+          const startMs = Math.max(day.start_ms, Math.min(c.dueMs, lastMs));
+          return { startMs, endMs: startMs + pinMs };
+        }),
+      ];
+      const all = layOutDay(spans, day.start_ms, day.end_ms);
+      const n = day.events.length;
+      out.set(day.start_ms, {
+        placed: all.slice(0, n),
+        pins: chips.map((chip, i) => ({ chip, placed: all[n + i] })),
+      });
+    }
+    return out;
+  });
 
   /** A task chip being dragged across the row: which one, from where, and
    *  how many columns the pointer has travelled. */
   let taskDrag = $state<
-    { id: number; fromMs: number; originX: number; colWidth: number; cols: number; moving: boolean } | null
+    { chip: TaskChip; id: number; fromMs: number; originX: number; colWidth: number; cols: number; moving: boolean } | null
   >(null);
 
   /** The day a drag currently points at, or null when nothing is moving.
@@ -787,6 +868,7 @@
     const col = (e.currentTarget as HTMLElement).closest('.tcell');
     if (!col) return;
     taskDrag = {
+      chip,
       id: chip.id,
       fromMs: dayMs,
       originX: e.clientX,
@@ -825,6 +907,71 @@
   /** Escape puts it back, the same escape the event drag honours. */
   const onTaskDragKey = (e: KeyboardEvent) => {
     if (e.key === 'Escape') endTaskDrag(false);
+  };
+
+  /**
+   * A task drawn at its hour, being dragged to another one.
+   *
+   * The event drag's geometry exactly — `colsMoved` for the day, and
+   * `spanForMove` for the snap, the civil day and the clamp — on a span with
+   * no length, because a due date is an instant. What differs is the write:
+   * one `ontaskdue` at the drop, and no confirm, since a task has nobody to
+   * notify.
+   */
+  let pinDrag = $state<{
+    id: number; dueMs: number; originX: number; originY: number;
+    colHeight: number; colWidth: number; dayMs: number; moving: boolean;
+    landedMs: number; topDeltaPct: number; dx: number;
+  } | null>(null);
+
+  /** Whether `chip` is the task in flight, drawn where it would land. */
+  const pinMoving = (chip: TaskChip) => pinDrag?.moving === true && pinDrag.id === chip.id;
+
+  function startPinDrag(chip: TaskChip, day: { start_ms: number; end_ms: number }, e: PointerEvent) {
+    if (e.button !== 0 || !chip.canWrite || !ontaskdue) return;
+    const col = (e.currentTarget as HTMLElement).closest('.col');
+    if (!col) return;
+    const box = col.getBoundingClientRect();
+    e.stopPropagation();
+    pinDrag = {
+      id: chip.id, dueMs: chip.dueMs, originX: e.clientX, originY: e.clientY,
+      colHeight: box.height, colWidth: box.width, dayMs: day.end_ms - day.start_ms,
+      moving: false, landedMs: chip.dueMs, topDeltaPct: 0, dx: 0,
+    };
+    window.addEventListener('pointermove', onPinDragMove);
+    window.addEventListener('pointerup', onPinDragEnd);
+    window.addEventListener('keydown', onPinDragKey);
+  }
+
+  function onPinDragMove(e: PointerEvent) {
+    if (!pinDrag) return;
+    const dx = e.clientX - pinDrag.originX;
+    const dy = e.clientY - pinDrag.originY;
+    if (!pinDrag.moving && !beganDrag(dx, dy)) return;
+    pinDrag.moving = true;
+    const dyFrac = pinDrag.colHeight === 0 ? 0 : dy / pinDrag.colHeight;
+    const cols = colsMoved(dx, pinDrag.colWidth);
+    const origin = { startMs: pinDrag.dueMs, endMs: pinDrag.dueMs };
+    pinDrag.landedMs = spanForMove(origin, dyFrac, pinDrag.dayMs, renderedDays.length, cols, SNAP_MS).startMs;
+    // Drawn on the two axes separately, for `onDragMove`'s reason: a day is
+    // a sideways step, not a column's height further down.
+    const vertical = spanForMove(origin, dyFrac, pinDrag.dayMs, renderedDays.length, 0, SNAP_MS).startMs;
+    pinDrag.topDeltaPct = ((vertical - pinDrag.dueMs) / pinDrag.dayMs) * 100;
+    pinDrag.dx = cols * pinDrag.colWidth;
+  }
+
+  function endPinDrag(commit: boolean) {
+    const d = pinDrag;
+    pinDrag = null;
+    window.removeEventListener('pointermove', onPinDragMove);
+    window.removeEventListener('pointerup', onPinDragEnd);
+    window.removeEventListener('keydown', onPinDragKey);
+    if (d && d.moving && commit && d.landedMs !== d.dueMs) ontaskdue?.(d.id, d.landedMs);
+  }
+
+  const onPinDragEnd = () => endPinDrag(true);
+  const onPinDragKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') endPinDrag(false);
   };
 
   function startDrag(event: UiEvent, day: { start_ms: number; end_ms: number }, e: PointerEvent) {
@@ -1691,12 +1838,17 @@
      Drawn only when the visible week has something due, so a week with no
      tasks carries no chrome for them. -->
 {#if anyTasks}
-  <div class="trow" class:dragging={taskDrag?.moving}>
+  <!-- The day columns' own track and gutter, for the all-day band's reason:
+       the row's label sits over the hour ruler and its cells over the days,
+       so it takes `--gutter` (wider with a second clock) and slides with the
+       columns, or its chips shear off their days. -->
+  <div class="trow" class:dragging={taskDrag?.moving} style="--gutter:{gutterWidth()}">
     <div class="tgutter">TASKS</div>
-    <div class="tcols" style="--cols:{renderedDays.length}">
+    <div class="track"><div class="tcols" class:sliding={panActive}
+         style="--cols:{renderedDays.length}; --visible:{visible}" style:transform={trackTransform}>
       {#each renderedDays as d (d.start_ms)}
         <div class="tcell" class:drop={taskDropMs === d.start_ms && taskDropMs !== taskDrag?.fromMs}>
-          {#each tasks?.get(dateKey(d.start_ms)) ?? [] as chip (chip.id)}
+          {#each rowTasksFor(d) as chip (chip.id)}
             {#if !inFlight(chip)}
               <div class="tchip" class:over={chip.overdue} style:--cal={chip.color ?? 'var(--muted)'}>
                 <input
@@ -1715,19 +1867,15 @@
             {/if}
           {/each}
           <!-- The chip in flight, drawn in the column it would land in. -->
-          {#if taskDropMs === d.start_ms && taskDrag}
-            {#each tasks?.get(dateKey(taskDrag.fromMs)) ?? [] as chip (chip.id)}
-              {#if inFlight(chip)}
-                <div class="tchip landing" class:over={chip.overdue}
-                     style:--cal={chip.color ?? 'var(--muted)'}>
-                  <span class="tt">{chip.summary}</span>
-                </div>
-              {/if}
-            {/each}
+          {#if taskDropMs === d.start_ms && taskDrag?.moving}
+            <div class="tchip landing" class:over={taskDrag.chip.overdue}
+                 style:--cal={taskDrag.chip.color ?? 'var(--muted)'}>
+              <span class="tt">{taskDrag.chip.summary}</span>
+            </div>
           {/if}
         </div>
       {/each}
-    </div>
+    </div></div>
   </div>
 {/if}
 
@@ -1765,6 +1913,7 @@
   {#each renderedDays as day, dayIndex (day.start_ms)}
     {@const isToday = day.start_ms === todayStart}
     {@const ghost = sweepStyle(day)}
+    {@const layout = dayLayouts.get(day.start_ms) ?? { placed: day.placed, pins: [] }}
     <div class="hour-crop" style:height={`${visibleHeight}px`}><div class="col" style={columnStyle(day)} class:today={isToday}
          class:keyboard={keyboardCursor?.dayStartMs === day.start_ms}
          data-start-ms={day.start_ms}
@@ -1849,7 +1998,7 @@
         </button>
       {/if}
 
-      {#each day.placed as p}
+      {#each layout.placed as p}
         <EventBlock
           event={day.events[p.idx]}
           placed={p}
@@ -1863,6 +2012,40 @@
             ? cursorNamesEvent(keyboardCursor, day.start_ms, day.events[p.idx])
             : false}
         />
+      {/each}
+
+      <!-- Tasks due at an hour, among the meetings (2026-09-17, macOS
+           Calendar's shape). Laid out with the events rather than over them
+           (`dayLayouts`), one line tall, and dressed as the row's chips are:
+           a checkbox first and a tint instead of a spine, because a task is
+           something to finish and not a commitment at a time. -->
+      {#each layout.pins as pin (pin.chip.id)}
+        {@const chip = pin.chip}
+        {@const width = 100 / pin.placed.columns}
+        {@const moving = pinMoving(chip)}
+        <div class="tchip tpin" class:dragging={moving} class:create-mode={createMode}
+             style:--cal={chip.color ?? 'var(--muted)'}
+             style:top="calc({pin.placed.top * 100}% + {moving ? pinDrag!.topDeltaPct : 0}% + 1px)"
+             style:height="{TASK_PIN_PX - 2}px"
+             style:left="calc({pin.placed.column * width}% + 3px)"
+             style:width="calc({width}% - 6px)"
+             style:transform={moving && pinDrag!.dx !== 0 ? `translateX(${pinDrag!.dx}px)` : undefined}
+             style:z-index={pin.placed.column + 1}>
+          <input
+            type="checkbox"
+            checked={false}
+            disabled={!chip.canWrite}
+            aria-label="Complete {chip.summary}"
+            onchange={() => ontasktoggle?.(chip.id, true)}
+          />
+          <!-- The title is the grab handle, as in the row. While it moves
+               it reads the hour it would land on, the way a dragged block's
+               card reads its span. -->
+          <button class="tt" disabled={!chip.canWrite}
+                  aria-label="{chip.summary}, due {formatClock(chip.dueMs, clockFormat())}"
+                  oncontextmenu={(e) => e.preventDefault()}
+                  onpointerdown={(e) => startPinDrag(chip, day, e)}>{#if moving}<span class="tclock">{formatClock(pinDrag!.landedMs, clockFormat())}</span>{/if}{chip.summary}</button>
+        </div>
       {/each}
 
       {#if isToday}
@@ -2022,16 +2205,27 @@
      something to finish rather than a commitment at a time, and the row
      says so by being flatter — no fill of the calendar's colour, a tick
      instead of a spine, and a checkbox as the first thing in it. */
-  .trow { display: flex; border-top: 1px solid var(--hairline);
+  /* `.grid`'s two tracks, and `--gutter` set on the row itself: it sits
+     outside `.grid`, so an inherited one never reached it, and the label
+     column shrank to the word "TASKS" — close enough to 44px to pass for
+     aligned with one clock, and well short of the 104px two clocks take,
+     which drew each chip half over the day before (reported 2026-09-17
+     with a screenshot). */
+  .trow { display: grid; grid-template-columns: var(--gutter, 44px) 1fr;
+          border-top: 1px solid var(--hairline);
           border-bottom: 1px solid var(--hairline);
           background: color-mix(in srgb, var(--text) 3%, transparent); }
   .trow.dragging { cursor: grabbing; }
-  .tgutter { width: var(--gutter); flex: 0 0 var(--gutter); font-size: 9.5px;
-             color: var(--muted); letter-spacing: .06em; text-align: right;
+  .tgutter { font-size: 9.5px; color: var(--muted); letter-spacing: .06em; text-align: right;
              padding: 7px 8px 0 0; }
-  .tcols { flex-grow: 1; display: grid; grid-template-columns: repeat(var(--cols), minmax(0, 1fr));
-           padding: 4px 0; min-width: 0; }
-  .tcell { min-width: 0; display: flex; flex-direction: column; gap: 2px; padding-right: 3px; }
+  /* `.cols`, and for its reasons: as many columns as are drawn, each a
+     visible column wide, moved by transform only while sliding. */
+  .tcols { display: grid; grid-template-columns: repeat(var(--cols), minmax(0, 1fr));
+           width: calc(100% * var(--cols) / var(--visible)); padding: 4px 0; }
+  .tcols.sliding { will-change: transform; }
+  /* Inset 3px each side, as a timed block is, so a chip's edges stand over
+     the edges of the meetings in its column. */
+  .tcell { min-width: 0; display: flex; flex-direction: column; gap: 2px; padding: 0 3px; }
   .tcell.drop { background: color-mix(in srgb, var(--accent) 7%, transparent);
                 box-shadow: inset 1px 0 0 0 color-mix(in srgb, var(--accent) 40%, transparent),
                             inset -1px 0 0 0 color-mix(in srgb, var(--accent) 40%, transparent); }
@@ -2049,6 +2243,17 @@
         color: inherit; padding: 0; text-align: left; min-width: 0; cursor: grab;
         touch-action: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tt:disabled { cursor: default; }
+  /* In the hour grid: placed like a block, one line, above the rules. */
+  .tpin { position: absolute; box-sizing: border-box; padding: 0 6px; gap: 5px; }
+  .tpin .tt { flex: 1; line-height: 1; }
+  /* `EventBlock`'s hover lift, for its reason: a task squeezed into half a
+     column beside a meeting reads "Call the …" until it is pointed at.
+     `!important` against the inline geometry, as there. */
+  .tpin:hover:not(.create-mode) { left: 3px !important; width: calc(100% - 6px) !important;
+                                  z-index: 20 !important; box-shadow: 0 4px 14px rgba(0, 0, 0, .5); }
+  .tpin.dragging { z-index: 50 !important; opacity: .85; outline: 1px solid var(--accent); }
+  .tpin.create-mode { pointer-events: none; }
+  .tclock { font-variant-numeric: tabular-nums; opacity: .7; margin-right: 5px; }
   @container (max-width: 104px) { .wx { display: none; } }
   .head b { font-size: 15px; color: var(--text);
             font-weight: 500; letter-spacing: -.02em; }

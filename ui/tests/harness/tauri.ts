@@ -22,7 +22,7 @@ import type { TemperatureUnit } from '../../src/lib/temperature';
 import { sliceWeek } from '../../src/lib/weekwindow';
 import {
   labelledWeek, weekLabel, APP_FIVE_MIN_AGO, APP_NOW, APP_SERIES_ID, APP_SERIES_OCCURRENCE,
-  LOCAL_TASK_LIST, TASK_LISTS, TASKS, IMPORT_PLANS,
+  LOCAL_TASK_LIST, TASK_LISTS, TASKS, TIMED_TASK, IMPORT_PLANS,
   APP_ONE_OFF_ID, APP_ONE_OFF_START, APP_GUESTS_ID, APP_SOLO_SERIES_ID,
   POPOVER_DETAILS, busyDayMonth,
   appWritableWeek, APP_WRITE_CALENDARS, APP_WEATHER, CREATED_DETAIL, crossZoneWeek,
@@ -808,6 +808,8 @@ const SEARCHABLE = [
 export function installTauriStub(scenario: string): Harness {
   quickAddPending = scenario === 'launched-with-quick-add';
   preferencesPending = scenario === 'launched-with-preferences';
+  // The default week, with a task due at an hour beside its one meeting.
+  if (scenario === 'timed-task') taskRows = [...TASKS, TIMED_TASK];
   // Reassigned by `sign_in` for the `sign-in-adds-account` scenario: a real
   // `sign_in` leaves the account durably connected, so the next `get_status`
   // must reflect it too, not just `get_calendars`.

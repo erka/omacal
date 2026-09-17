@@ -15,6 +15,7 @@ for anybody to notice.
 | File | Written by | Read by |
 | --- | --- | --- |
 | `cross-zone-week.json` | `commands::tests::the_cross_zone_week_golden_file_is_what_assemble_week_produces` | `crossZoneWeek` in `ui/tests/fixtures.ts` |
+| `day-layout.json` | `commands::tests::the_day_layout_golden_file_is_what_lay_out_day_produces` | `ui/tests/daylayout.spec.ts`, against the port in `ui/src/lib/daylayout.ts` |
 
 To rewrite them after an intended change:
 

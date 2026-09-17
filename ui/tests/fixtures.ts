@@ -2087,6 +2087,19 @@ export const TASKS: Task[] = [
     completed: true, calendar: 'Work', color: '#2dd4bf', priority: 0, canWrite: true },
 ];
 
+/** A task due at an hour, which the grid draws among the meetings rather than
+ *  in the row — at 11:30, inside `labelledWeek`'s 11:00–12:00 block, so the
+ *  two have to share the column. Its own scenario (`timed-task`) rather than
+ *  a row of `TASKS`: a day holding one is laid out again from its events'
+ *  instants, and the `writable` week's hand-placed blocks sit in columns
+ *  their instants do not belong to, so every drag spec there would be
+ *  aiming at a block that had moved. */
+export const TIMED_TASK: Task = {
+  id: 15, calendarId: 1, summary: 'Call the bank', notes: null,
+  dueMs: APP_MON + 11.5 * H, dueAllDay: false,
+  completed: false, calendar: 'Personal', color: '#5b8def', priority: 0, canWrite: true,
+};
+
 /** What `plan_ics_import` answers, by the shape a spec asks for: a file
  *  with something to import and something refused, and one with nothing.
  *  Two guest entries, because the panel's whole job is saying that out

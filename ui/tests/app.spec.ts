@@ -5768,9 +5768,9 @@ test.describe('dropping a file on the calendar', () => {
  * about, and it is avoidable.
  */
 test.describe('tasks on the grid', () => {
-  const openWeek = async (page: import('@playwright/test').Page) => {
+  const openWeek = async (page: import('@playwright/test').Page, fixture = 'default') => {
     await page.clock.setFixedTime(APP_NOW);
-    await page.goto(app());
+    await page.goto(app(fixture));
     await expect(page.locator('.ev').first()).toBeVisible();
   };
 
@@ -5837,6 +5837,113 @@ test.describe('tasks on the grid', () => {
     )).toMatchObject({ on: true });
     // Once done it leaves the grid: the row is what still needs doing.
     await expect(page.locator('.trow').getByText('Ship the release')).toHaveCount(0);
+  });
+
+  /** macOS Calendar's shape (2026-09-17): a task due at an hour is drawn at
+   *  that hour, and shares it with the meeting it falls inside instead of
+   *  covering the meeting's title. */
+  test('a task due at an hour is drawn at it, beside the meeting it overlaps', async ({ page }) => {
+    await openWeek(page, 'timed-task');
+    await expect(page.locator('.trow').getByText('Call the bank')).toHaveCount(0);
+    const body = page.getByTestId('week-body');
+    const pin = body.locator('.tpin', { hasText: 'Call the bank' });
+    await expect(pin).toBeVisible();
+
+    const monday = body.locator('.col').first();
+    const [p, m, col] = await Promise.all([
+      pin.boundingBox(), monday.locator('.ev').first().boundingBox(), monday.boundingBox(),
+    ]);
+    // Half an hour into the 11:00 meeting, at the grid's 70px an hour.
+    expect(Math.abs(p!.y - (m!.y + 35))).toBeLessThanOrEqual(2);
+    // Side by side: the meeting gave up half its column, and the task is in
+    // the half it gave up.
+    expect(m!.width).toBeLessThan(col!.width / 2);
+    expect(p!.x).toBeGreaterThanOrEqual(m!.x + m!.width);
+    expect(p!.x + p!.width).toBeLessThanOrEqual(col!.x + col!.width);
+  });
+
+  /** Reported 2026-09-17 with a screenshot: with a second clock the row's
+   *  chips sat half a column left of their days, because the row never had
+   *  the gutter the grid below it widens. */
+  test('the row lines up with the day columns, with one clock and with two', async ({ page }) => {
+    await openWeek(page, 'timed-task');
+    const lined = async () => {
+      const cells = page.locator('.trow .tcell');
+      const cols = page.getByTestId('week-body').locator('.col');
+      await expect(cells).toHaveCount(7);
+      for (const i of [0, 3, 6]) {
+        const [c, d] = await Promise.all([cells.nth(i).boundingBox(), cols.nth(i).boundingBox()]);
+        expect(Math.abs(c!.x - d!.x)).toBeLessThanOrEqual(1);
+        expect(Math.abs(c!.width - d!.width)).toBeLessThanOrEqual(1);
+      }
+    };
+    await lined();
+    await page.evaluate(() => (window as any).__setSecondZone('Asia/Kolkata'));
+    await expect(page.locator('.zl.z2')).toBeVisible();
+    await lined();
+  });
+
+  test('dragging a task at an hour moves its due time', async ({ page }) => {
+    await openWeek(page, 'timed-task');
+    const title = page.getByTestId('week-body').locator('.tpin .tt', { hasText: 'Call the bank' });
+    const from = (await title.boundingBox())!;
+    const x = from.x + from.width / 2;
+    const y = from.y + from.height / 2;
+
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x, y + 70, { steps: 8 });
+    // An hour down, and the chip says where it would land before the drop.
+    await expect(page.locator('.tpin.dragging')).toContainText('12:30');
+    await page.mouse.up();
+
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__harness.calls.filter((c: any) => c.cmd === 'update_task').pop()?.args,
+    )).toMatchObject({ summary: 'Call the bank', dueMs: APP_MON + 12.5 * 3_600_000, dueAllDay: false });
+  });
+
+  test('escape during a drag at an hour writes nothing', async ({ page }) => {
+    await openWeek(page, 'timed-task');
+    const title = page.getByTestId('week-body').locator('.tpin .tt', { hasText: 'Call the bank' });
+    const from = (await title.boundingBox())!;
+    const x = from.x + from.width / 2;
+    const y = from.y + from.height / 2;
+
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x, y + 70, { steps: 8 });
+    await page.keyboard.press('Escape');
+    await page.mouse.up();
+
+    expect(await page.evaluate(() =>
+      (window as any).__harness.calls.filter((c: any) => c.cmd === 'update_task').length)).toBe(0);
+    await expect(page.locator('.tpin.dragging')).toHaveCount(0);
+  });
+
+  test('the checkbox on a task at an hour completes it', async ({ page }) => {
+    await openWeek(page, 'timed-task');
+    await page.getByTestId('week-body')
+      .getByRole('checkbox', { name: 'Complete Call the bank' }).click();
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_task_completed').pop()?.args,
+    )).toMatchObject({ id: 15, on: true });
+    await expect(page.locator('.tpin')).toHaveCount(0);
+  });
+
+  /** A task drawn in the part of the column the visible hours crop away is
+   *  a task nobody sees. It keeps the row instead. */
+  test('a task whose hour the visible hours leave out keeps the row', async ({ page }) => {
+    await openWeek(page, 'timed-task');
+    await expect(page.locator('.tpin', { hasText: 'Call the bank' })).toBeVisible();
+    await page.getByRole('button', { name: 'Menu', exact: true }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Appearance' }).click();
+    await modal.getByLabel('Visible hours start time').selectOption('12');
+    await page.keyboard.press('Escape');
+
+    await expect(page.locator('.tpin')).toHaveCount(0);
+    await expect(page.locator('.trow').getByText('Call the bank')).toBeVisible();
   });
 
   /** No chrome for a week with nothing due. */
