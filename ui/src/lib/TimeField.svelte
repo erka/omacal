@@ -1,8 +1,10 @@
 <!-- ui/src/lib/TimeField.svelte
      A time field with a list we own.
 
-     Replaces `<input type="time">` in the task editor (2026-09-17, by
-     request with a screenshot). The native field renders the *system
+     **The one time field** (Plamen, 2026-09-17, #111): the task editor and
+     the event form both use it, and any change to how a time is picked is
+     made here so the two cannot drift. Replaced `<input type="time">` in the
+     task editor first (by request with a screenshot). The native field renders the *system
      locale's* clock rather than the app's (`EventForm` left it for that
      reason on 2026-08-25), draws its empty state as a greyed "12:30 PM" that
      reads as a chosen time, and is edited a segment at a time with no list
@@ -25,6 +27,10 @@
     disabled = false,
     open = $bindable(false),
     invalid = $bindable(false),
+    required = false,
+    live = false,
+    flagged = false,
+    note = null,
     isToday = false,
     placeholder = 'Add time',
     onchange,
@@ -40,6 +46,21 @@
      *  wants to fix one letter, not start again — and bindable, so the owner
      *  can refuse to save around it. */
     invalid?: boolean;
+    /** A time must be given: no clear button, and an emptied field is
+     *  marked like any other entry that is not a time. An event's start and
+     *  end are required; a task's due time is not. */
+    required?: boolean;
+    /** Take a finished-looking typed time as the value on each keystroke —
+     *  two-digit minutes after a separator, or a meridiem said — so what the
+     *  form draws on the grid follows the typing. Committing "1" as 01:00 on
+     *  the way to "12:30" would walk it through nonsense, hence "finished". */
+    live?: boolean;
+    /** Marked by the owner for a reason of its own: the event form's refused
+     *  save, which names the field it is about. */
+    flagged?: boolean;
+    /** A few words beside a row of the list, or `null` — the End field's
+     *  duration from the start. */
+    note?: ((slot: string) => string | null) | null;
     /** Whether the day this time belongs to is today, so an empty field
      *  opens its list on the next half hour rather than on 09:00. */
     isToday?: boolean;
@@ -78,12 +99,20 @@
     void reveal('center');
   }
 
+  /** What `onchange` last reported, so a value a live keystroke already put
+   *  in place is still reported once, when the entry is committed. */
+  let reported = value;
+  $effect(() => {
+    if (!typing) reported = value;
+  });
+
   function set(v: string) {
     typing = false;
     invalid = false;
     text = v ? displayClock(v, clockFormat()) : '';
-    if (v !== value) {
-      value = v;
+    value = v;
+    if (v !== reported) {
+      reported = v;
       onchange?.(v);
     }
   }
@@ -98,7 +127,7 @@
   function commitTyped(): boolean {
     if (!typing) return true;
     const t = text.trim();
-    if (t === '') {
+    if (t === '' && !required) {
       set('');
       return true;
     }
@@ -154,7 +183,7 @@
     aria-controls="{uid}-list"
     aria-autocomplete="list"
     aria-activedescendant={open && active ? `${uid}-${active}` : undefined}
-    aria-invalid={invalid ? 'true' : undefined}
+    aria-invalid={invalid || flagged ? 'true' : undefined}
     class:empty={!value && !typing}
     {placeholder}
     {disabled}
@@ -167,13 +196,14 @@
       if (parsed) {
         active = slotAtOrBefore(parsed, slots);
         if (open) void reveal('center');
+        if (live && /[:.][0-5]\d|[ap]/i.test(text)) value = parsed;
       }
     }}
     onchange={() => commitTyped()}
     onkeydown={onKey}
     onpointerdown={() => { if (!open) show(); }}
   />
-  {#if value && !disabled}
+  {#if value && !disabled && !required}
     <button type="button" class="clear" aria-label="Clear {label.toLowerCase()}"
             onclick={() => { set(''); open = false; }}>×</button>
   {/if}
@@ -215,7 +245,7 @@
           aria-selected={slot === value}
           onpointerdown={(e) => e.preventDefault()}
           onclick={() => pick(slot)}
-        >{displayClock(slot, clockFormat())}</button>
+        >{displayClock(slot, clockFormat())}{#if note?.(slot)}<span class="note">{note(slot)}</span>{/if}</button>
       {/each}
     </div>
   {/if}
@@ -257,4 +287,13 @@
   .list button:hover { background: color-mix(in srgb, var(--text) 8%, transparent); }
   .list button[data-active] { outline: 1px solid var(--accent); outline-offset: -1px; }
   .list button.on { background: var(--accent); color: var(--on-accent, #fff); }
+  .note { margin-left: 10px; color: var(--muted); font-size: 11px; }
+  .list button.on .note { color: inherit; opacity: .75; }
+  /* A finger, not a pointer (#111 asks for tablets): rows a fingertip can
+     hit without taking the one beside it. */
+  @media (pointer: coarse) {
+    .list { max-height: 280px; }
+    .list button { padding: 11px 12px; font-size: 14px; }
+    .toggle { padding: 6px; }
+  }
 </style>

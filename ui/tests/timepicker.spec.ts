@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { openingSlot, slotAtOrBefore, stepSlot, timeSlots } from '../src/lib/timepicker';
+import { durationNote, openingSlot, slotAtOrBefore, stepSlot, timeSlots } from '../src/lib/timepicker';
 
 /**
  * The task editor's time list (2026-09-17): which times it offers, and
@@ -50,4 +50,16 @@ test('the arrow keys step through the list and stop at its ends', () => {
   // From a time the list does not hold, or from nothing, the first row.
   expect(stepSlot(SLOTS, null, 1)).toBe('00:00');
   expect(stepSlot(SLOTS, '11:15', 1)).toBe('00:00');
+});
+
+test('the End list says how long each choice makes the event', () => {
+  expect(durationNote('10:00', '10:30')).toBe('30 min');
+  expect(durationNote('10:00', '11:00')).toBe('1 h');
+  expect(durationNote('10:00', '11:30')).toBe('1.5 h');
+  expect(durationNote('10:00', '12:15')).toBe('2 h 15 min');
+  expect(durationNote('10:15', '10:30')).toBe('15 min');
+  // At or before the start there is nothing to say.
+  expect(durationNote('10:00', '10:00')).toBe(null);
+  expect(durationNote('10:00', '09:30')).toBe(null);
+  expect(durationNote('soon', '10:30')).toBe(null);
 });

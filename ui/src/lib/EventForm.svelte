@@ -4,7 +4,9 @@
   import { onMount } from 'svelte';
   import { clockFormat } from './clock.svelte';
   import { secondZone } from './secondzone.svelte';
-  import { displayClock, parseClock, zoneAbbrev, zoneClock } from './timefmt';
+  import { zoneAbbrev, zoneClock } from './timefmt';
+  import TimeField from './TimeField.svelte';
+  import { durationNote } from './timepicker';
   import { knownGuests, type KnownGuest } from './people';
   import { containsHttpUrl } from './location';
   import { searchPlaces, type PlaceHit } from './places';
@@ -25,47 +27,6 @@
     toggledAllDay, videoCallProblem, weekdayCodeForDate,
     type EventFormResult, type EventFormValue, type Scope,
   } from './eventform';
-
-  // The two time fields, imperatively synced rather than value-bound: a
-  // reactive `value=` would rewrite the input the moment a keystroke
-  // commits — "9" becoming "09:00" under the cursor — so the DOM is only
-  // written when the field is not being typed in. External changes (a
-  // moved date, the DST repair) land through the same effect, which is
-  // safe because both happen with focus elsewhere.
-  let startEl = $state<HTMLInputElement | undefined>();
-  let endEl = $state<HTMLInputElement | undefined>();
-  $effect(() => {
-    const shown = displayClock(value.start, clockFormat());
-    if (startEl && document.activeElement !== startEl) startEl.value = shown;
-  });
-  $effect(() => {
-    const shown = displayClock(value.end, clockFormat());
-    if (endEl && document.activeElement !== endEl) endEl.value = shown;
-  });
-
-  /** Keystroke-time commit, so the grid's ghost keeps following the typing
-   *  the way it did when these were native time inputs (the live-preview
-   *  spec holds it to that). Only once the text reads as a *finished* time
-   *  — two-digit minutes after a separator, or a meridiem said — because
-   *  committing "1" as 01:00 on the way to "12:30" would walk the ghost
-   *  through nonsense on every keystroke. */
-  function liveClock(e: Event, which: 'start' | 'end') {
-    const el = e.currentTarget as HTMLInputElement;
-    if (!/[:.][0-5]\d|[ap]/i.test(el.value)) return;
-    const parsed = parseClock(el.value);
-    if (parsed) value[which] = parsed;
-  }
-
-  /** Blur-time commit: parse what was typed — either clock, suffix
-   *  deciding — take it on success, and re-render from storage either way,
-   *  so an unparseable entry snaps back to the last real time instead of
-   *  lingering as text the save would have to refuse. */
-  function commitClock(e: Event, which: 'start' | 'end') {
-    const el = e.currentTarget as HTMLInputElement;
-    const parsed = parseClock(el.value);
-    if (parsed) value[which] = parsed;
-    el.value = displayClock(value[which], clockFormat());
-  }
 
   let {
     anchor,
@@ -391,6 +352,14 @@
   let startDateOpen = $state(false);
   let endDateOpen = $state(false);
   let repeatEndOpen = $state(false);
+  // And one per time field, for the same reason.
+  let startTimeOpen = $state(false);
+  let endTimeOpen = $state(false);
+  /** A time field holds something that is not a time (`TimeField`'s own
+   *  judgement). A save refuses around it rather than keeping the last good
+   *  time without a word. */
+  let startTimeBad = $state(false);
+  let endTimeBad = $state(false);
 
   let panelEl: HTMLDivElement | undefined = $state();
   let formEl: HTMLFormElement | undefined = $state();
@@ -523,6 +492,14 @@
     invalidField = null;
     if (value.calendarId === null) {
       error = 'There is no calendar here you can write to.';
+      return;
+    }
+    // First: a time field holding something that is not a time. The last
+    // good time is still in `value`, and saving it would quietly ignore what
+    // the user typed over it.
+    if (!value.isAllDay && (startTimeBad || endTimeBad)) {
+      error = 'Type a time like 9:30 or 21:30, or pick one from the list.';
+      invalidField = startTimeBad ? 'start' : 'end';
       return;
     }
     const videoProblem = videoCallProblem(value, provider);
@@ -661,8 +638,8 @@
     // owning their Escape here is what stops one press closing a chooser and
     // the form behind it. Closing all three is right because at most one is
     // ever open — opening a second would have closed the first.
-    if (startDateOpen || endDateOpen || repeatEndOpen) {
-      startDateOpen = endDateOpen = repeatEndOpen = false;
+    if (startDateOpen || endDateOpen || repeatEndOpen || startTimeOpen || endTimeOpen) {
+      startDateOpen = endDateOpen = repeatEndOpen = startTimeOpen = endTimeOpen = false;
       return;
     }
     oncancel();
@@ -744,18 +721,13 @@
           <!-- Marked, not only described: `aria-invalid` puts the answer on the
                field it is about, which for a time that does not exist is the
                whole difficulty — nothing else on the form looks wrong. -->
-          <!-- Text, not `type="time"`: the native field renders the *system
-               locale's* clock — AM/PM over a grid drawn in 24h — and offers
-               no say in the matter. This one renders and parses through the
-               app's own clock setting; storage stays `HH:MM` (reported
-               2026-08-25). -->
-          <input
-            type="text"
-            bind:this={startEl}
-            oninput={(e) => liveClock(e, 'start')}
-            onchange={(e) => commitClock(e, 'start')}
-            aria-invalid={invalidField === 'start' ? 'true' : undefined}
-          />
+          <!-- `TimeField`, the task editor's own (#111): one time picker for
+               the calendar and the tasks. Typed in either clock or picked
+               from the list, shown in the app's clock setting, stored as
+               `HH:MM`; `live` so the grid's draft follows the typing. -->
+          <TimeField label="Start" bind:value={value.start} bind:open={startTimeOpen}
+                     bind:invalid={startTimeBad} required live
+                     flagged={invalidField === 'start'} />
         </label>
       {/if}
       <label class="field">
@@ -770,13 +742,12 @@
       {#if !value.isAllDay}
         <label class="field">
           <span class="lab">End</span>
-          <input
-            type="text"
-            bind:this={endEl}
-            oninput={(e) => liveClock(e, 'end')}
-            onchange={(e) => commitClock(e, 'end')}
-            aria-invalid={invalidField === 'end' ? 'true' : undefined}
-          />
+          <!-- Each time in the list says how long the event would be, while
+               it ends on the day it starts. -->
+          <TimeField label="End" bind:value={value.end} bind:open={endTimeOpen}
+                     bind:invalid={endTimeBad} required live
+                     flagged={invalidField === 'end'}
+                     note={value.endDate === value.date ? (slot) => durationNote(value.start, slot) : null} />
         </label>
       {/if}
     </div>

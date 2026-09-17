@@ -4429,13 +4429,14 @@ test.describe('EventForm', () => {
     expect(queries).toEqual([]);
   });
 
-  /** The time fields speak the app's clock, not the engine's: they are
-   *  text now (the native input rendered the system locale's AM/PM over a
-   *  24h grid), rendered through `displayClock` and parsed through
-   *  `parseClock` — so a dial entry lands as storage, an unparseable one
-   *  snaps back to the last real time, and either clock is accepted on the
-   *  way in. The 12h rendering itself is pinned unit-side (timefmt.spec). */
-  test('a time typed in either clock lands, and a typo snaps back', async ({ page }) => {
+  /** The time fields speak the app's clock, not the engine's, and since
+   *  #111 they are `TimeField`, the task editor's own: a dial entry lands as
+   *  storage, either clock is accepted on the way in, and an entry that is
+   *  not a time is **marked and refused at Save** — the task editor's rule,
+   *  which replaced snapping back to the last good time when the two forms
+   *  took one picker (Plamen, 2026-09-17). The 12h rendering itself is
+   *  pinned unit-side (timefmt.spec). */
+  test('a time typed in either clock lands, and a typo is marked and refused', async ({ page }) => {
     await open(page, 'create');
     const start = page.getByLabel('Start', { exact: true });
 
@@ -4444,10 +4445,72 @@ test.describe('EventForm', () => {
     await start.fill('9:30 pm');
     await start.blur();
     await expect(start).toHaveValue('21:30');
+    await page.getByLabel('End', { exact: true }).fill('22:00');
+    await page.getByLabel('End', { exact: true }).blur();
 
     await start.fill('half past nine');
     await start.blur();
-    await expect(start).toHaveValue('21:30');
+    await expect(start).toHaveValue('half past nine');
+    await expect(start).toHaveAttribute('aria-invalid', 'true');
+    await page.getByRole('button', { name: 'Create' }).click();
+    expect(await saves(page)).toEqual([]);
+    await expect(page.getByTestId('form-error')).toContainText('Type a time like 9:30 or 21:30');
+
+    // An emptied field is not a time either: an event has a start.
+    await start.fill('');
+    await start.blur();
+    await expect(start).toHaveAttribute('aria-invalid', 'true');
+
+    await start.fill('9pm');
+    await start.blur();
+    await expect(start).toHaveValue('21:00');
+    await expect(start).not.toHaveAttribute('aria-invalid', 'true');
+    await page.getByRole('button', { name: 'Create' }).click();
+    expect(await saves(page)).toHaveLength(1);
+  });
+
+  /** #111: a time can be picked, not only typed, and the End list says how
+   *  long each choice makes the event. */
+  test('start and end times are picked from a list, the end one with durations', async ({ page }) => {
+    await open(page, 'create');
+    const start = page.getByLabel('Start', { exact: true });
+    const end = page.getByLabel('End', { exact: true });
+    await start.fill('10:00');
+    await start.blur();
+    await end.fill('10:30');
+    await end.blur();
+
+    await start.click();
+    const startList = page.getByRole('listbox', { name: 'Start options' });
+    await expect(startList.locator('[data-active]')).toHaveText('10:00');
+    await startList.getByRole('option', { name: '11:00', exact: true }).click();
+    await expect(start).toHaveValue('11:00');
+
+    await end.click();
+    const endList = page.getByRole('listbox', { name: 'End options' });
+    await expect(endList.getByRole('option', { name: /^11:30/ })).toContainText('30 min');
+    await expect(endList.getByRole('option', { name: /^13:00/ })).toContainText('2 h');
+    await expect(endList.getByRole('option', { name: /^10:30/ })).not.toContainText('min');
+    await endList.getByRole('option', { name: /^12:30/ }).click();
+    await expect(end).toHaveValue('12:30');
+    // No clear button: an event always has a start and an end.
+    await expect(page.getByRole('button', { name: 'Clear start' })).toHaveCount(0);
+
+    await page.getByRole('button', { name: 'Create' }).click();
+    expect(await saves(page)).toHaveLength(1);
+  });
+
+  /** One Escape closes the list and nothing behind it; the next closes the form. */
+  test('Escape closes an open time list before the form', async ({ page }) => {
+    await open(page, 'create');
+    await page.getByLabel('Start', { exact: true }).click();
+    await expect(page.getByRole('listbox', { name: 'Start options' })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('listbox', { name: 'Start options' })).toHaveCount(0);
+    await expect(page.getByRole('dialog', { name: 'New event' })).toBeVisible();
+    expect(await page.evaluate(() => (window as any).__cancels)).toBe(0);
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('dialog', { name: 'New event' })).toHaveCount(0);
   });
 
   test('only writable calendars are offered', async ({ page }) => {

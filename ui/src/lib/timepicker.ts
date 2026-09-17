@@ -59,6 +59,22 @@ export function openingSlot(
   return slots.includes('09:00') ? '09:00' : slots[0];
 }
 
+/** How long an end at `end` makes a span starting at `start`, as the End
+ *  list says it beside each time ("30 min", "1 h", "1.5 h", "2 h 15 min").
+ *  `null` for an end at or before the start, which the list leaves bare. */
+export function durationNote(start: string, end: string): string | null {
+  const a = minutesOf(start);
+  const b = minutesOf(end);
+  if (a === null || b === null || b <= a) return null;
+  const d = b - a;
+  if (d < 60) return `${d} min`;
+  const h = Math.floor(d / 60);
+  const m = d % 60;
+  if (m === 0) return `${h} h`;
+  if (m === 30) return `${h}.5 h`;
+  return `${h} h ${m} min`;
+}
+
 /** The highlight moved `by` rows, held to the list's ends rather than
  *  wrapping: a hand holding ArrowDown past 23:30 means "the last one", not
  *  "midnight again". From nowhere, a step lands on `from ?? first`. */
