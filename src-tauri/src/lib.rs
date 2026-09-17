@@ -1731,6 +1731,7 @@ pub fn run() {
             settings::set_tasks_width,
             settings::set_show_date,
             settings::set_menubar_preferences,
+            settings::set_menubar_day_view,
             settings::set_menubar_sections,
             menubar::menubar_feed,
             menubar::menubar_action,

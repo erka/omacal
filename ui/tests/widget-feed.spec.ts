@@ -91,20 +91,34 @@ test('agenda feed accepts eight days and rejects invalid or oversized day groups
 });
 
 
-test('combined calendar colors are bounded hex values before they reach QML', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'omacal-colors-'));
+test('older feeds default to agenda and visible-hour bounds reject malformed ranges', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'omacal-visible-hours-'));
   const path = join(dir, 'feed');
-  const read = (colors: unknown) => {
-    writeFileSync(path, JSON.stringify({events: [{title: 'Design sync', start_ms: 1, end_ms: 2, all_day: false, colors}]}));
+  const panel = {events: [], label: true, day_start_ms: 0, day_end_ms: 86400000,
+    join_minutes: 5, clocks: {}, hours: []};
+  const read = (fields: Record<string, unknown>) => {
+    writeFileSync(path, JSON.stringify({events: [], panel: {...panel, ...fields}}));
     return spawnSync('/usr/bin/python3', [helper, path], {timeout: 3000, encoding: 'utf8'});
   };
   try {
-    for (const colors of [['#112233', '#ABCDEF'], [], Array(200).fill('#123456')]) {
-      const result = read(colors);
+    const legacy = read({});
+    expect(legacy.status).toBe(0);
+    expect(JSON.parse(legacy.stdout).panel.day_view).toBe(false);
+    for (const day_view of [false, true]) {
+      const result = read({day_view, visible_start_ms: 5 * 3600000, visible_end_ms: 23 * 3600000});
       expect(result.status).toBe(0);
-      expect(JSON.parse(result.stdout).events[0].colors).toEqual(colors);
+      expect(JSON.parse(result.stdout).panel.day_view).toBe(day_view);
     }
-    for (const invalid of [null, {}, 'red', ['red'], ['#fff'], ['#123456\u202e'], [12], Array(201).fill('#123456')])
-      expect(read(invalid).status).not.toBe(0);
+    for (const fields of [
+      {day_view: null}, {day_view: 0}, {day_view: 'false'},
+      {visible_start_ms: 0}, {visible_end_ms: 86400000},
+      {visible_start_ms: false, visible_end_ms: 86400000},
+      {visible_start_ms: 0, visible_end_ms: '86400000'},
+      {visible_start_ms: 0.5, visible_end_ms: 86400000},
+      {visible_start_ms: -1, visible_end_ms: 86400000},
+      {visible_start_ms: 0, visible_end_ms: 86400001},
+      {visible_start_ms: 3600000, visible_end_ms: 3600000},
+      {visible_start_ms: 7200000, visible_end_ms: 3600000},
+    ]) expect(read({day_view: false, ...fields}).status, JSON.stringify(fields)).not.toBe(0);
   } finally { rmSync(dir, {recursive: true, force: true}); }
 });

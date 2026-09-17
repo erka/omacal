@@ -45,10 +45,10 @@ test('progress clamps completed and future meetings; multi-day blocks clip to th
   expect(rows[0].height).toBe(1);
 });
 
-async function popup(page: import('@playwright/test').Page, visibleStart = 0, visibleEnd = 24) {
+async function popup(page: import('@playwright/test').Page, visibleStart = 0, visibleEnd = 24, options: { allDayCount?: number; shortMeetings?: boolean; tasks?: boolean } = {}) {
   await page.clock.install({ time: at(13) + 21 * 60000 });
   await page.setViewportSize({ width: 420, height: 600 });
-  await page.addInitScript(({ start, end, visibleStart, visibleEnd }) => {
+  await page.addInitScript(({ start, end, visibleStart, visibleEnd, options }) => {
     const calls: { action: string }[] = [];
     (window as any).__actions = calls;
     const events = [
@@ -58,10 +58,22 @@ async function popup(page: import('@playwright/test').Page, visibleStart = 0, vi
       { title: 'Labor Day', start_ms: start, end_ms: end, all_day: true, color: '#a8bd94', calendar: 'Personal' },
       { title: 'Labor Day', start_ms: start, end_ms: end, all_day: true, color: '#abcdef', calendar: 'Work' },
     ];
+    for (let i = 1; i < (options.allDayCount ?? 1); i++)
+      events.push({title: `All-day ${i}`, start_ms: start, end_ms: end, all_day: true, color: '#a8bd94', calendar: 'Personal'});
+    if (options.shortMeetings) events.push(
+      {title: 'Quick one', start_ms: start + 15 * 3600000, end_ms: start + 15.25 * 3600000, all_day: false, color: '#7da9e8'},
+      {title: 'Quick two', start_ms: start + 15.25 * 3600000, end_ms: start + 15.5 * 3600000, all_day: false, color: '#dba575'},
+    );
     const panel = { visible_start_ms: start + visibleStart * 3600000, visible_end_ms: start + visibleEnd * 3600000, day_start_ms: start, day_end_ms: end, events, timezone: 'UTC', date_format: 'dmy', time_format: '24h', day_view: false, label: true, join_minutes: 5 };
     const callbacks = new Map<number, (event: unknown) => void>();
     let nextCallback = 0;
     let changedCallback: number | undefined;
+    (window as any).__changeMenuFormat = () => {
+      panel.time_format = '12h';
+      if (changedCallback !== undefined) callbacks.get(changedCallback)?.({event: 'menubar-changed', payload: null});
+    };
+    (window as any).__changeOtherPreferences = () => { panel.label = false; panel.join_minutes = 15; };
+    (window as any).__menuPreferences = () => ({day: panel.day_view, label: panel.label, join: panel.join_minutes});
     (window as any).__changeMenuView = () => {
       panel.day_view = true;
       if (changedCallback !== undefined) callbacks.get(changedCallback)?.({ event: 'menubar-changed', payload: null });
@@ -71,14 +83,15 @@ async function popup(page: import('@playwright/test').Page, visibleStart = 0, vi
       invoke: async (cmd: string, args: any) => {
         if (cmd === 'plugin:event|listen') { if (args.event === 'menubar-changed') changedCallback = args.handler; return 1; }
         if (cmd === 'plugin:event|unlisten') return;
-        if (cmd === 'menubar_feed') return { events: events.filter(e => e.end_ms > start + 13 * 3600000), panel, tasks: [] };
+        if (cmd === 'menubar_feed') return structuredClone({ events: events.filter(e => e.end_ms > start + 13 * 3600000), panel, tasks: options.tasks ? [{title: 'Submit expenses', overdue: false}] : [] });
         if (cmd === 'get_palette') return { bg: '#20232b', surface: '#303540', text: '#e5e7eb', muted: '#9ca3af', accent: '#87b7ff', is_dark: true };
-        if (cmd === 'set_menubar_preferences') { panel.day_view = args.dayView; return {}; }
+        if (cmd === 'set_menubar_day_view') { panel.day_view = args.dayView; return {}; }
+        if (cmd === 'set_menubar_preferences') { panel.day_view = args.dayView; panel.label = args.label; panel.join_minutes = args.joinMinutes; return {}; }
         if (cmd === 'menubar_action') { calls.push(args); return; }
         throw new Error(cmd);
       },
     };
-  }, { start: at(0), end: at(24), visibleStart, visibleEnd });
+  }, { start: at(0), end: at(24), visibleStart, visibleEnd, options });
   await page.goto('/?menubar');
 }
 
@@ -131,6 +144,13 @@ test('all-day duplicates combine only matching titles and spans without changing
   expect(events).toHaveLength(7);
 });
 
+
+test('open agenda applies a changed clock format without waiting for polling', async ({ page }) => {
+  await popup(page);
+  await expect(page.locator('header p')).toHaveText('07/09/2026 · 13:21');
+  await page.evaluate(() => (window as any).__changeMenuFormat());
+  await expect(page.locator('header p')).toHaveText('07/09/2026 · 1:21 PM');
+});
 
 test('open popup applies changed preferences without waiting for its polling timer', async ({ page }) => {
   await popup(page);
@@ -230,4 +250,42 @@ test('when today is spent, the nearest later day with anything takes its place �
   const once = plan({ days_ahead: 0 }, [dayOf('Mon 7', spent), dayOf('Tue 8', [event('t', 33, 34)]), dayOf('Wed 9', [event('w', 57, 58)])]);
   expect(titles(once)).toEqual(['EARLIER TODAY', 'TOMORROW']);
   expect(titles(plan({ earlier: 'off' }, [dayOf('Mon 7', spent), dayOf('Tue 8', [])]))).toEqual([]);
+});
+
+
+test('popup view changes preserve settings changed since its last feed snapshot', async ({ page }) => {
+  await popup(page);
+  await expect(page.getByRole('button', {name: 'Day', exact: true})).toBeVisible();
+  await page.evaluate(() => (window as any).__changeOtherPreferences());
+  await page.getByRole('button', {name: 'Day', exact: true}).click();
+  await expect(page.getByLabel('Day calendar')).toBeVisible();
+  expect(await page.evaluate(() => (window as any).__menuPreferences())).toEqual({day: true, label: false, join: 15});
+});
+
+test('day scrolling accounts for all-day rows and leaves tasks in the same scroll area', async ({ page }) => {
+  await popup(page, 0, 24, {allDayCount: 6, tasks: true});
+  await page.getByRole('button', {name: 'Day', exact: true}).click();
+  const scroll = page.locator('.scroll');
+  await expect(page.getByLabel('Day calendar')).toBeVisible();
+  const top = (await scroll.boundingBox())!.y;
+  const marker = await page.getByLabel('Now 13:21').boundingBox();
+  expect(marker!.y - top).toBeCloseTo(100, 0);
+  await scroll.evaluate(el => { el.scrollTop = el.scrollHeight; });
+  const task = await page.getByRole('button', {name: 'Submit expenses', exact: true}).boundingBox();
+  const viewport = await scroll.boundingBox();
+  expect(task!.y).toBeGreaterThanOrEqual(viewport!.y);
+  expect(task!.y + task!.height).toBeLessThanOrEqual(viewport!.y + viewport!.height);
+});
+
+test('back-to-back short meetings do not cover each other at their minimum readable height', async ({ page }) => {
+  await popup(page, 12, 23, {shortMeetings: true});
+  await page.getByRole('button', {name: 'Day', exact: true}).click();
+  const first = page.locator('.event').filter({hasText: 'Quick one'});
+  const second = page.locator('.event').filter({hasText: 'Quick two'});
+  await first.scrollIntoViewIfNeeded();
+  const a = (await first.boundingBox())!, b = (await second.boundingBox())!;
+  expect(a.height).toBeGreaterThanOrEqual(22);
+  expect(a.y + a.height <= b.y || a.x + a.width <= b.x || b.x + b.width <= a.x).toBe(true);
+  await expect(first).toContainText('15:00');
+  await expect(second).toContainText('15:15');
 });

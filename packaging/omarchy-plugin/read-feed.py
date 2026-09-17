@@ -2,7 +2,6 @@
 """Read one bounded snapshot for the shell; never wait on a FIFO or follow a link."""
 import json
 import os
-import re
 import signal
 import stat
 import sys
@@ -27,20 +26,11 @@ def clean(value, depth=0):
     raise ValueError('invalid field')
 
 
-def colors_valid(event):
-    if 'colors' not in event:
-        return True
-    colors = event['colors']
-    return isinstance(colors, list) and len(colors) <= 200 and all(
-        isinstance(c, str) and len(c) == 7 and re.fullmatch(r'#[0-9a-fA-F]{6}', c) for c in colors)
-
-
 def events_valid(events):
     # The app can publish point-in-time events. Rejecting an equal start/end
     # here blanks the entire widget, including every other upcoming meeting.
     return isinstance(events, list) and len(events) <= 200 and all(isinstance(e, dict)
         and all(type(e.get(k)) in (int, float) and abs(e[k]) < 8640000000000000 for k in ('start_ms', 'end_ms'))
-        and colors_valid(e)
         and e['end_ms'] >= e['start_ms'] and type(e.get('all_day')) is bool
         and all(e.get(k) is None or isinstance(e[k], str) for k in ('title', 'color', 'conference', 'location', 'calendar', 'response'))
         for e in events)
@@ -79,6 +69,7 @@ def read_feed(path):
             raise ValueError('invalid clocks')
         if any(abs(panel[k]) >= 8640000000000000 for k in ('day_start_ms', 'day_end_ms')):
             raise ValueError('day out of range')
+        panel['day_view'] = panel.get('day_view', False)
         if not all(type(panel.get(k)) is bool for k in ('day_view', 'label')):
             raise ValueError('invalid preferences')
         if len(panel['hours']) > 26 or not all(type(h) is int and panel['day_start_ms'] <= h < panel['day_end_ms'] for h in panel['hours']):

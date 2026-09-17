@@ -5328,6 +5328,29 @@ test.describe("App: showing today's date", () => {
     await expect(modal.getByTestId('settings-note')).toHaveCount(0);
   });
 
+  test('menu bar label and Join timing are saved and remembered', async ({ page }) => {
+    await page.goto(app('writable'));
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    const modal = page.getByRole('dialog', { name: 'Settings' });
+    await modal.getByRole('tab', { name: 'Menu bar' }).click();
+    await modal.getByLabel('Show Join before a meeting').selectOption('15');
+    await modal.getByLabel('Show meeting title and countdown').uncheck();
+    const calls = await page.evaluate(() => window.__harness.calls
+      .filter(c => c.cmd === 'set_menubar_preferences').map(c => c.args));
+    expect(calls).toEqual([
+      { dayView: false, label: true, joinMinutes: 15 },
+      { dayView: false, label: false, joinMinutes: 15 },
+    ]);
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Settings…' }).click();
+    await modal.getByRole('tab', { name: 'Menu bar' }).click();
+    await expect(modal.getByLabel('Show Join before a meeting')).toHaveValue('15');
+    await expect(modal.getByLabel('Show meeting title and countdown')).not.toBeChecked();
+  });
+
+
   test('menu bar view and Join timing are saved and remembered', async ({ page }) => {
     await page.goto(app('writable'));
     await page.getByRole('button', { name: 'Menu' }).click();

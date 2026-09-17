@@ -13,9 +13,15 @@ export function joinable(events, now, minutes) {
       return aNext ? a.start_ms - b.start_ms : b.start_ms - a.start_ms;
     })[0] || null;
 }
-export function layout(events, start, end) {
+// Lane packing uses the painted span: a readable minimum-height short event
+// must not cover the next event in its lane. Original times stay on `event`.
+export function layout(events, start, end, minimumDurationMs = 0) {
+  const minimum = Math.min(end - start, Math.max(0, minimumDurationMs));
   const rows = (events || []).filter(e => !e.all_day && e.start_ms < end && e.end_ms > start)
-    .map(event => ({ event, start: Math.max(start, event.start_ms), end: Math.min(end, event.end_ms), lane: 0, lanes: 1 }))
+    .map(event => {
+      const top = Math.min(Math.max(start, event.start_ms), end - minimum);
+      return { event: event, start: top, end: Math.min(end, Math.max(event.end_ms, top + minimum)), lane: 0, lanes: 1 };
+    })
     .sort((a, b) => a.start - b.start || a.end - b.end);
   let cluster = [], ends = [], clusterEnd = -Infinity;
   function finish() { for (const row of cluster) row.lanes = ends.length; }

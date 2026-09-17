@@ -1,11 +1,10 @@
 export interface Event {
   title: string | null; start_ms: number; end_ms: number; all_day: boolean;
-  colors?: string[];
   conference?: string | null; color?: string | null; calendar?: string | null;
 }
 export function progress(event: Event, now: number): number;
 export function joinable<T extends Event>(events: T[], now: number, minutes: number): T | null;
-export function layout<T extends Event>(events: T[], start: number, end: number): {
+export function layout<T extends Event>(events: T[], start: number, end: number, minimumDurationMs?: number): {
   event: T; start: number; end: number; lane: number; lanes: number; top: number; height: number;
 }[];
 

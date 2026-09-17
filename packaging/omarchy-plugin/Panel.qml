@@ -698,7 +698,8 @@ Panel {
             id: dayTimeline
             visible: root.dayView
             width: parent.width
-            height: visible ? Math.max(Style.space(200), panelFlick.height) : 0
+            height: visible ? implicitHeight : 0
+            scrollView: panelFlick
             day: root.day
             nowMs: root.nowMs
             foreground: root.foreground

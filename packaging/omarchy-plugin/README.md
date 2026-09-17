@@ -8,7 +8,9 @@ The popup can show an **agenda list** or a **full day view**. The agenda keeps
 completed events under EARLIER TODAY, dims them, and draws elapsed progress
 beside NOW for an ongoing event. The day view places events by time, shows overlaps
 side by side, and marks NOW with a moving line. It opens near the current time;
-scroll to inspect the rest of the day. All-day events and tasks remain available.
+scroll to inspect the rest of the day. All-day events, the hour grid, and tasks
+share one scroll area between the fixed header and footer. Short meetings get
+separate lanes when their minimum readable height would otherwise overlap.
 
 Choose the view in **OmaCal → Settings → Menu bar**.
 The same preferences control the macOS popup: show/hide the bar label and

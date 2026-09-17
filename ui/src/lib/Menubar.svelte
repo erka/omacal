@@ -1,11 +1,10 @@
 <script lang="ts">
-  import CalendarColors from './CalendarColors.svelte';
   import { formatDate, type DateFormat } from './datefmt';
   import { onMount } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
   import { invoke } from '@tauri-apps/api/core';
   import { applyPalette } from './theme';
-  import { setMenubarPreferences } from './settings';
+  import { setMenubarDayView } from './settings';
   import { visibleRange, layout, agendaSections, progress, joinable, uniqueAllDay, type Event } from '../../../packaging/omarchy-plugin/Timeline.mjs';
 
   type Panel = { visible_start_ms?: number; visible_end_ms?: number; agenda_days?: { date_label: string; events: Event[] }[]; truncated?: boolean; day_start_ms: number; day_end_ms: number; timezone: string;
@@ -15,6 +14,7 @@
   let now = $state(Date.now());
   let error = $state('');
   let scrolling: HTMLDivElement;
+  let timeline = $state<HTMLDivElement>();
   let initialScroll = false;
   const panel = $derived(feed?.panel);
   // Whether the fold of finished events is open. Renderer state, not a
@@ -27,7 +27,7 @@
   const allDay = $derived(uniqueAllDay(panel?.events ?? []).filter(e => e.all_day));
   const range = $derived(panel ? visibleRange(panel) : { start: 0, end: 86400000 });
   const gridHeight = $derived((range.end - range.start) / 60000);
-  const rows = $derived(panel ? layout(uniqueAllDay(panel.events), range.start, range.end) : []);
+  const rows = $derived(panel ? layout(uniqueAllDay(panel.events), range.start, range.end, 24 * 60000) : []);
   const call = $derived(feed ? joinable(feed.events, now, panel?.join_minutes ?? 5) : null);
   const fraction = $derived(panel ? Math.max(0, Math.min(1, (now - range.start) / (range.end - range.start))) : 0);
   const hours = $derived(panel ? Array.from({ length: Math.ceil((range.end - range.start) / 3600000) }, (_, i) => range.start + i * 3600000) : []);
@@ -49,12 +49,13 @@
   }
   async function changeView(day: boolean) {
     if (!panel) return;
-    try { await setMenubarPreferences(day, panel.label, panel.join_minutes); initialScroll = false; await refresh(); }
+    try { await setMenubarDayView(day); initialScroll = false; await refresh(); }
     catch (e) { error = String(e); }
   }
   $effect(() => {
-    if (panel?.day_view && scrolling && !initialScroll) {
-      scrolling.scrollTop = Math.max(0, fraction * gridHeight - 100);
+    if (panel?.day_view && scrolling && timeline && !initialScroll) {
+      const gridTop = timeline.getBoundingClientRect().top - scrolling.getBoundingClientRect().top + scrolling.scrollTop;
+      scrolling.scrollTop = Math.max(0, gridTop + fraction * gridHeight - 100);
       initialScroll = true;
     }
   });
@@ -102,15 +103,15 @@
   <div class="scroll" bind:this={scrolling}>
     {#if !feed}<p class="empty">Loading calendar…</p>
     {:else if panel?.day_view}
-      {#if allDay.length}<div class="all-day"><small>ALL DAY</small>{#each allDay as event}<button onclick={() => action(date(panel.day_start_ms))}>{event.title ?? '(no title)'}<CalendarColors colors={event.colors} /></button>{/each}</div>{/if}
-      <div class="timeline" style:height={`${gridHeight}px`} aria-label="Day calendar">
+      {#if allDay.length}<div class="all-day"><small>ALL DAY</small>{#each allDay as event}<button onclick={() => action(date(panel.day_start_ms))}>{event.title ?? '(no title)'}</button>{/each}</div>{/if}
+      <div class="timeline" bind:this={timeline} style:height={`${gridHeight}px`} aria-label="Day calendar">
         {#each hours as hour}<div class="hour" style:top={`${(hour - range.start) / (range.end - range.start) * 100}%`}><span>{clock(hour)}</span></div>{/each}
         {#each rows as row}
-          <button class="event" class:compact={row.height * gridHeight < 40} class:past={row.event.end_ms <= now} style:top={`${row.top * 100}%`} style:height={`${Math.max(row.height * gridHeight, 22)}px`}
+          <button class="event" class:compact={row.height * gridHeight < 40} class:past={row.event.end_ms <= now} style:top={`${row.top * 100}%`} style:height={`${row.height * gridHeight}px`}
             style:left={`calc(64px + (100% - 70px) * ${row.lane / row.lanes})`} style:width={`calc((100% - 70px) / ${row.lanes} - 3px)`}
             style:--event-color={color(row.event)} title={`${clock(row.event.start_ms)}–${clock(row.event.end_ms)} · ${row.event.title ?? '(no title)'}`}
             onclick={() => action(date(panel!.day_start_ms))}>
-            <strong>{row.event.title ?? '(no title)'}</strong><small>{clock(row.event.start_ms)} – {clock(row.event.end_ms)}{row.event.conference ? ' · ▣' : ''}</small><CalendarColors colors={row.event.colors} />
+            <strong>{row.event.title ?? '(no title)'}</strong><small>{clock(row.event.start_ms)} – {clock(row.event.end_ms)}{row.event.conference ? ' · ▣' : ''}</small>
           </button>
         {/each}
         {#if now >= range.start && now < range.end}<div class="now-line" style:top={`${fraction * 100}%`} aria-label={`Now ${clock(now)}`}><span>{clock(now)}</span></div>{/if}

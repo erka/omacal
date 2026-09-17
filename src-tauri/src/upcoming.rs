@@ -913,10 +913,27 @@ mod tests {
 mod today_field_tests {
     use super::*;
 
-    /// The widget's copy of today comes from the same switch the tray obeys,
-    /// and carries the day rather than leaving the reader to compute one: the
-    /// zone is the app's setting, and a widget reading the desktop's clock
-    /// would disagree with the grid beside it for hours at a time.
+    #[test]
+    fn skipped_visible_hour_falls_back_to_the_whole_day() {
+        let tz = jiff::tz::TimeZone::get("America/New_York").unwrap();
+        let day: jiff::civil::Date = "2026-03-08".parse().unwrap();
+        // 02:00 is skipped to 03:00, collapsing this selected hour to zero.
+        let (start, end) = visible_day_bounds(day, &tz, 2, 3).unwrap();
+        assert_eq!(start, day.to_zoned(tz.clone()).unwrap().timestamp().as_millisecond());
+        assert_eq!(end, day.tomorrow().unwrap().to_zoned(tz).unwrap().timestamp().as_millisecond());
+        assert_eq!(end - start, 23 * 3_600_000);
+    }
+
+    #[test]
+    fn repeated_visible_hour_includes_both_occurrences() {
+        let tz = jiff::tz::TimeZone::get("America/New_York").unwrap();
+        let day: jiff::civil::Date = "2026-11-01".parse().unwrap();
+        let (start, end) = visible_day_bounds(day, &tz, 1, 2).unwrap();
+        assert_eq!(jiff::Timestamp::from_millisecond(start).unwrap().to_string(), "2026-11-01T05:00:00Z");
+        assert_eq!(jiff::Timestamp::from_millisecond(end).unwrap().to_string(), "2026-11-01T07:00:00Z");
+        assert_eq!(end - start, 2 * 3_600_000);
+    }
+
     #[tokio::test]
     async fn visible_hours_use_wall_clock_boundaries_across_dst() {
         let pool = omacal_store::connect_memory().await.unwrap();
@@ -937,6 +954,9 @@ mod today_field_tests {
         }
     }
 
+    /// The agenda carries today plus a week whatever the Week view shows:
+    /// what the popups draw is the user's section choice, and the next day
+    /// with anything rule needs the lookahead regardless.
     #[tokio::test]
     async fn the_agenda_carries_a_week_whatever_the_week_view_shows() {
         let pool = omacal_store::connect_memory().await.unwrap();
@@ -971,6 +991,10 @@ mod today_field_tests {
         assert!(!panel.label);
     }
 
+    /// The widget's copy of today comes from the same switch the tray obeys,
+    /// and carries the day rather than leaving the reader to compute one: the
+    /// zone is the app's setting, and a widget reading the desktop's clock
+    /// would disagree with the grid beside it for hours at a time.
     #[tokio::test]
     async fn the_feed_publishes_today_and_the_switch() {
         let pool = omacal_store::connect_memory().await.unwrap();

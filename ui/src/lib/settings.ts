@@ -408,6 +408,8 @@ export const setDateFormatPreference = (format: DateFormat) => invoke<AppSetting
 
 export const setMenubarPreferences = (dayView: boolean, label: boolean, joinMinutes: number) =>
   invoke<AppSettings>('set_menubar_preferences', { dayView, label, joinMinutes });
+export const setMenubarDayView = (dayView: boolean) =>
+  invoke<AppSettings>('set_menubar_day_view', { dayView });
 export const setMenubarSections = (earlier: 'folded' | 'off', tomorrow: boolean, daysAhead: number) =>
   invoke<AppSettings>('set_menubar_sections', { earlier, tomorrow, daysAhead });
 
