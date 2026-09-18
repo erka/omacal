@@ -356,6 +356,61 @@
     }
   }
 
+  /** A list's own new line (Plamen, 2026-09-18: "an elegant way to add a
+   *  task in a particular list"): "Add a task" at the end of a list opens an
+   *  empty row there, the title is typed in place, and a date or an hour is
+   *  one press away rather than in the way. Enter adds it and leaves a fresh
+   *  line for the next, the way a list is written down. One line at a time,
+   *  like the editor. */
+  let lineList = $state<number | null>(null);
+  let line = $state({ summary: '', date: '', time: '' });
+  let lineWhen = $state(false);
+  let lineTimeInvalid = $state(false);
+  let lineBusy = $state(false);
+  let lineInput: HTMLInputElement | undefined = $state();
+
+  async function openLine(listId: number) {
+    lineList = listId;
+    line = { summary: '', date: '', time: '' };
+    lineWhen = false;
+    lineTimeInvalid = false;
+    note = null;
+    await tick();
+    lineInput?.focus();
+  }
+
+  async function addLine() {
+    if (lineBusy || lineList === null || line.summary.trim() === '' || lineTimeInvalid) return;
+    lineBusy = true;
+    note = null;
+    const { ms, allDay } = dueFromInputs(line.date, line.time);
+    try {
+      setTaskRows(await createTask(lineList, line.summary, ms, allDay));
+      nowMs = Date.now();
+      line = { summary: '', date: '', time: '' };
+      lineWhen = false;
+    } catch (e) {
+      // Kept as typed: it is one fix away from going in.
+      note = String(e);
+    } finally {
+      lineBusy = false;
+    }
+    await tick();
+    lineInput?.focus();
+  }
+
+  const lineKeys = (e: KeyboardEvent) => {
+    if (e.key === 'Enter') { e.preventDefault(); void addLine(); }
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); lineList = null; }
+  };
+
+  /** The line's due, said the way a row says it, while the date and time
+   *  fields are folded away. */
+  const lineDue = $derived.by(() => {
+    const { ms, allDay } = dueFromInputs(line.date, line.time);
+    return ms === null ? '' : dueLabel({ dueMs: ms, dueAllDay: allDay } as Task, nowMs, clockFormat(), dateFormat());
+  });
+
   function edit(task: Task) {
     if (!task.canWrite) return;
     editingId = task.id;
@@ -442,7 +497,7 @@
         disabled={adding}
       />
       {#if lists.length > 1}
-        <ListPicker label="Task list" choices={addChoices} value={filterListId} disabled={adding}
+        <ListPicker dotOnly label="Task list" choices={addChoices} value={filterListId} disabled={adding}
                     onpick={(id) => (filterListId = id)} />
       {/if}
       <!-- A list of its own for what is being added: made on this device,
@@ -577,6 +632,55 @@
             </div>
           {/if}
         {/each}
+        {#if g.list}
+          {@const listId = g.list.calendarId}
+          {#if lineList === listId}
+            <div class="newline">
+              <div class="row">
+                <span class="box" aria-hidden="true"></span>
+                <span class="tick" style:background={g.color ?? 'var(--muted)'}></span>
+                <input class="ntitle" aria-label="New task on {g.label}" placeholder="New task"
+                       bind:this={lineInput} bind:value={line.summary} disabled={lineBusy}
+                       onkeydown={lineKeys} />
+                {#if lineDue && !lineWhen}<span class="due">{lineDue}</span>{/if}
+                <button type="button" class="nwhen" class:set={lineDue !== ''} aria-label="Date and time"
+                        aria-expanded={lineWhen} title="Date and time" onclick={() => (lineWhen = !lineWhen)}>
+                  <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true" focusable="false">
+                    <rect x="2.2" y="3.2" width="11.6" height="10.6" rx="2" fill="none" stroke="currentColor" stroke-width="1.3" />
+                    <path d="M2.2 6.6h11.6M5.4 1.8v2.6M10.6 1.8v2.6" fill="none" stroke="currentColor"
+                          stroke-width="1.3" stroke-linecap="round" />
+                  </svg>
+                </button>
+              </div>
+              {#if lineWhen}
+                <!-- The editor's own date controls: one way to say when,
+                     whether the task is new or not. -->
+                <div class="nwhen-fields">
+                  <div class="quick">
+                    <button onclick={() => (line = { ...line, date: dateInputValue(quickDue('today', nowMs)), time: '' })}
+                            disabled={lineBusy}>Today</button>
+                    <button onclick={() => (line = { ...line, date: dateInputValue(quickDue('tomorrow', nowMs)), time: '' })}
+                            disabled={lineBusy}>Tomorrow</button>
+                    <button onclick={() => (line = { ...line, date: dateInputValue(quickDue('nextWeek', nowMs)), time: '' })}
+                            disabled={lineBusy}>Next week</button>
+                    {#if line.date}
+                      <button class="clear" onclick={() => (line = { ...line, date: '', time: '' })}
+                              disabled={lineBusy}>Clear</button>
+                    {/if}
+                  </div>
+                  <div class="when">
+                    <DateField label="Due date" bind:value={line.date} disabled={lineBusy} />
+                    <TimeField label="Due time" bind:value={line.time} bind:invalid={lineTimeInvalid} disabled={lineBusy}
+                               isToday={line.date === '' || line.date === dateInputValue(Date.now())}
+                               onchange={(v) => { if (v && line.date === '') line.date = dateInputValue(Date.now()); }} />
+                  </div>
+                </div>
+              {/if}
+            </div>
+          {:else}
+            <button type="button" class="addline" onclick={() => void openLine(listId)}>+ Add a task</button>
+          {/if}
+        {/if}
       {/each}
 
       {#if grouping === 'list' && naming === 'new'}
@@ -765,6 +869,29 @@
   .eact button:disabled, .quick button:disabled, .add input:disabled { opacity: .5; cursor: default; }
 
   .empty { color: var(--muted); padding: 10px 6px; line-height: 1.5; }
+
+  /* "Add a task" sits where the next row would, its text in the titles'
+     column, quiet until pointed at. */
+  .addline { appearance: none; -webkit-appearance: none; display: block; font: inherit;
+             font-size: 11.5px; color: var(--muted); background: none; border: 0; cursor: pointer;
+             text-align: left; padding: 4px 6px 6px 40px; opacity: .8; }
+  .addline:hover { color: var(--text); opacity: 1; }
+  .newline { border-radius: 6px; margin: 1px 0 4px;
+             background: color-mix(in srgb, var(--text) 3.5%, transparent); }
+  /* An unticked box's outline that is not a control yet: nothing to tick. */
+  .box { width: 14px; height: 14px; flex: none; box-sizing: border-box; border-radius: 3px;
+         border: 1px dashed color-mix(in srgb, var(--text) 32%, transparent); }
+  .ntitle { flex-grow: 1; min-width: 0; font: inherit; color: var(--text); background: none;
+            border: 0; padding: 0; outline: none; }
+  .ntitle::placeholder { color: var(--muted); opacity: .75; }
+  .nwhen { display: inline-flex; align-items: center; justify-content: center; flex: none;
+           color: var(--muted); background: none; border: 0; border-radius: 4px; cursor: pointer;
+           padding: 2px 3px; }
+  .nwhen:hover, .nwhen[aria-expanded='true'] { color: var(--text);
+           background: color-mix(in srgb, var(--text) 8%, transparent); }
+  .nwhen.set { color: var(--accent); }
+  .nwhen:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+  .nwhen-fields { display: flex; flex-direction: column; gap: 8px; padding: 2px 8px 9px 40px; }
   .earlier-toggle { appearance: none; -webkit-appearance: none; font: inherit; font-size: 11px;
                     color: var(--muted); background: none; border: 0; cursor: pointer;
                     padding: 8px 6px 4px; text-align: left; }

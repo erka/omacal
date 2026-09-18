@@ -5794,6 +5794,8 @@ test.describe('the tasks sidebar', () => {
     const side = await openTasks(page);
     const field = side.getByRole('combobox', { name: 'Task list' });
     await expect(field).toHaveText('All lists');
+    // Only the dot until it is opened: the name is for a screen reader.
+    expect((await field.boundingBox())!.width).toBeLessThan(40);
     await field.focus();
     await page.keyboard.press('ArrowDown');
     const rows = side.getByRole('listbox', { name: 'Task list' }).getByRole('option');
@@ -5833,6 +5835,52 @@ test.describe('the tasks sidebar', () => {
     await side.getByRole('button', { name: 'By list' }).click();
     const personal = side.locator('.head', { hasText: 'Personal' });
     await expect(personal.locator('.count')).toHaveText('2');
+  });
+
+  /** A list's own line (Plamen, 2026-09-18): "Add a task" at the end of a
+   *  list opens a row there, Enter adds the task to that list, and a fresh
+   *  line waits for the next. */
+  test('a list\'s own line adds a task to it and stays open for the next', async ({ page }) => {
+    const side = await openTasks(page);
+    await side.getByRole('button', { name: 'By list' }).click();
+    await side.getByRole('button', { name: '+ Add a task' }).nth(1).click();
+    const line = side.getByRole('textbox', { name: 'New task on Work' });
+    await expect(line).toBeFocused();
+    await line.fill('Tag 4.6.0');
+    await line.press('Enter');
+
+    await expect.poll(() => lastCall(page, 'create_task'))
+      .toEqual({ calendarId: 2, summary: 'Tag 4.6.0', dueMs: null, dueAllDay: true });
+    await expect(side.locator('.head', { hasText: 'Work' }).locator('.count')).toHaveText('3');
+    await expect(line).toHaveValue('');
+    await expect(line).toBeFocused();
+
+    // Escape closes it, and adds nothing.
+    await line.press('Escape');
+    await expect(line).toHaveCount(0);
+    await expect(side).toBeVisible();
+    await expect(side.getByRole('button', { name: '+ Add a task' })).toHaveCount(2);
+  });
+
+  test('the line takes a date and an hour before it adds', async ({ page }) => {
+    const side = await openTasks(page);
+    await side.getByRole('button', { name: 'By list' }).click();
+    await side.getByRole('button', { name: '+ Add a task' }).first().click();
+    const line = side.getByRole('textbox', { name: 'New task on Personal' });
+    await line.fill('Call the accountant');
+    await side.getByRole('button', { name: 'Date and time' }).click();
+    await side.getByRole('button', { name: 'Tomorrow' }).click();
+    const time = side.getByRole('combobox', { name: 'Due time' });
+    await time.fill('10:00');
+    await time.press('Enter');
+    // Folded away, the line still says when.
+    await side.getByRole('button', { name: 'Date and time' }).click();
+    await expect(side.locator('.newline .due')).toHaveText('Tomorrow 10:00');
+    await line.press('Enter');
+
+    await expect.poll(() => lastCall(page, 'create_task')).toEqual({
+      calendarId: 1, summary: 'Call the accountant', dueMs: APP_MON + 34 * 3_600_000, dueAllDay: false,
+    });
   });
 
   test('saving an edit without picking a list moves nothing', async ({ page }) => {

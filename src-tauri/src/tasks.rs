@@ -510,15 +510,21 @@ pub(crate) const TASK_GONE: &str = "that task is no longer here";
 pub(crate) const NOT_A_TASK_LIST: &str =
     "that is not a task list you can add to — `omacal tasks` names the lists in each row";
 
+/// `due_all_day` is `update_task`'s distinction: a date, or an hour on it.
+/// Left out, a due is a date — the add row's "by Friday" — and a list's own
+/// new line sends `false` when it was given a time.
 #[tauri::command]
 pub async fn create_task(
     state: tauri::State<'_, AppState>,
     calendar_id: i64,
     summary: String,
     due_ms: Option<i64>,
+    due_all_day: Option<bool>,
 ) -> Result<Vec<TaskVm>, String> {
     crate::demo_sync_guard(state.demo)?;
-    create_impl(&state, calendar_id, &summary, due_ms, true).await.map_err(|e| e.to_string())?;
+    create_impl(&state, calendar_id, &summary, due_ms, due_all_day.unwrap_or(true))
+        .await
+        .map_err(|e| e.to_string())?;
     list_tasks(state).await
 }
 

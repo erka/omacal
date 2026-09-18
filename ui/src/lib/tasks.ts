@@ -63,8 +63,10 @@ export const deleteTaskList = (id: number) => invoke<TaskList[]>('delete_task_li
 export const setTaskCompleted = (id: number, on: boolean) =>
   invoke<Task[]>('set_task_completed', { id, on });
 
-export const createTask = (calendarId: number, summary: string, dueMs: number | null) =>
-  invoke<Task[]>('create_task', { calendarId, summary, dueMs });
+/** A new task on a list. `dueAllDay` is `updateTask`'s: a date, or the hour
+ *  `dueMs` names on it. */
+export const createTask = (calendarId: number, summary: string, dueMs: number | null, dueAllDay = true) =>
+  invoke<Task[]>('create_task', { calendarId, summary, dueMs, dueAllDay });
 
 export const deleteTask = (id: number) => invoke<Task[]>('delete_task_cmd', { id });
 

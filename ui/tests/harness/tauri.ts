@@ -1375,7 +1375,8 @@ export function installTauriStub(scenario: string): Harness {
         const list = taskLists.find((l) => l.calendarId === listId)!;
         taskRows = [...taskRows, {
           id: 900 + taskRows.length, calendarId: listId, summary: args.summary as string,
-          notes: null, dueMs: null, dueAllDay: false, completed: false, completedMs: null,
+          notes: null, dueMs: (args.dueMs as number | null) ?? null, dueAllDay: args.dueAllDay !== false,
+          completed: false, completedMs: null,
           calendar: list.name, color: list.color, priority: 0, canWrite: true,
         }];
         return taskRows;
