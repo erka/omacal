@@ -5610,6 +5610,8 @@ test.describe('the tasks sidebar', () => {
     await page.getByRole('button', { name: 'Tasks…' }).click();
     return page.getByRole('complementary', { name: 'Tasks' });
   };
+  const lastCall = (page: import('@playwright/test').Page, cmd: string) => page.evaluate((c) =>
+    (window as any).__harness.calls.filter((x: any) => x.cmd === c).pop()?.args, cmd);
 
   /** The sidebar sits beside the week rather than over it: tasks are worked
    *  next to the calendar, and a panel covering the grid hides the thing the
@@ -5766,7 +5768,8 @@ test.describe('the tasks sidebar', () => {
 
   test('a new task lands on the chosen list', async ({ page }) => {
     const side = await openTasks(page);
-    await side.getByRole('combobox', { name: 'Task list' }).selectOption({ label: 'Work' });
+    await side.getByRole('combobox', { name: 'Task list' }).click();
+    await side.getByRole('option', { name: 'Work' }).click();
     await side.getByRole('textbox', { name: 'New task title' }).fill('Cut 2.3.0');
     await side.getByRole('textbox', { name: 'New task title' }).press('Enter');
     await expect(side.getByText('Cut 2.3.0')).toBeVisible();
@@ -5782,6 +5785,62 @@ test.describe('the tasks sidebar', () => {
     const side = await openTasks(page);
     await expect(side.getByRole('textbox', { name: 'New task title' }))
       .toHaveAttribute('placeholder', 'Add to Personal…');
+  });
+
+  /** The list picker is the app's own, not GTK's (Plamen, 2026-09-18: "lists
+   *  selection is not styled"): its rows are the page's, with each list's
+   *  colour, and the keyboard walks them the way a select's would. */
+  test('the list picker is drawn by the app and answers the keyboard', async ({ page }) => {
+    const side = await openTasks(page);
+    const field = side.getByRole('combobox', { name: 'Task list' });
+    await expect(field).toHaveText('All lists');
+    await field.focus();
+    await page.keyboard.press('ArrowDown');
+    const rows = side.getByRole('listbox', { name: 'Task list' }).getByRole('option');
+    await expect(rows).toContainText(['All lists', 'Personal', 'Work']);
+    await expect(side.getByRole('option', { name: 'All lists' })).toHaveAttribute('aria-selected', 'true');
+
+    // Escape closes only the list: the pane stays.
+    await page.keyboard.press('Escape');
+    await expect(side.getByRole('listbox')).toHaveCount(0);
+    await expect(side).toBeVisible();
+
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('Enter');
+    await expect(field).toHaveText('Work');
+    await expect(side.getByRole('textbox', { name: 'New task title' }))
+      .toHaveAttribute('placeholder', 'Add to Work…');
+    await expect(field).toBeFocused();
+  });
+
+  /** The editor says which list a task is on, and Save moves it to another
+   *  with the rest of the edit (Plamen, 2026-09-18). */
+  test('the editor shows a task\'s list, and Save moves it to another', async ({ page }) => {
+    const side = await openTasks(page);
+    await side.getByRole('button', { name: 'Answer the issue' }).click();
+    const list = side.getByRole('combobox', { name: 'List', exact: true });
+    await expect(list).toHaveText('Work');
+    await list.click();
+    await side.getByRole('option', { name: 'Personal' }).click();
+    await expect(list).toHaveText('Personal');
+    // Nothing moves until Save.
+    expect(await lastCall(page, 'update_task')).toBeUndefined();
+    await side.getByRole('button', { name: 'Save' }).click();
+
+    await expect.poll(() => lastCall(page, 'update_task')).toMatchObject({ id: 14, calendarId: 1 });
+    await side.getByRole('button', { name: 'By list' }).click();
+    const personal = side.locator('.head', { hasText: 'Personal' });
+    await expect(personal.locator('.count')).toHaveText('2');
+  });
+
+  test('saving an edit without picking a list moves nothing', async ({ page }) => {
+    const side = await openTasks(page);
+    await side.getByRole('button', { name: 'Answer the issue' }).click();
+    await side.getByRole('textbox', { name: 'Task title', exact: true }).fill('Answer #66');
+    await side.getByRole('button', { name: 'Save' }).click();
+    await expect.poll(() => lastCall(page, 'update_task')).toMatchObject({ summary: 'Answer #66', calendarId: null });
   });
 });
 
@@ -6198,8 +6257,7 @@ test.describe('task lists on this device', () => {
     await expect(heading(side, 'Groceries')).toBeVisible();
     await expect(side.getByText('Nothing on this list.')).toBeVisible();
     // Where the next task goes: the list just made for it.
-    const list = side.getByRole('combobox', { name: 'Task list' });
-    await expect(list.locator('option:checked')).toHaveText('Groceries');
+    await expect(side.getByRole('combobox', { name: 'Task list' })).toHaveText('Groceries');
     await side.getByRole('textbox', { name: 'New task title' }).fill('Milk');
     await side.getByRole('textbox', { name: 'New task title' }).press('Enter');
     const made = await lastCall(page, 'create_task');
@@ -6232,7 +6290,8 @@ test.describe('task lists on this device', () => {
     await field.press('Enter');
     await expect.poll(() => lastCall(page, 'rename_task_list')).toEqual({ id: 1, name: 'Home' });
     await expect(heading(side, 'Home')).toBeVisible();
-    await expect(side.getByRole('combobox', { name: 'Task list' }).locator('option', { hasText: 'Home' })).toHaveCount(1);
+    await side.getByRole('combobox', { name: 'Task list' }).click();
+    await expect(side.getByRole('option', { name: 'Home' })).toHaveCount(1);
   });
 
   test('deleting a list asks first, and takes its tasks with it', async ({ page }) => {

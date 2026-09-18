@@ -74,14 +74,16 @@ export const deleteTask = (id: number) => invoke<Task[]>('delete_task_cmd', { id
  *  `null` due date clears it. `dueAllDay` is the difference between "by
  *  Thursday" and "by Thursday at 18:00", which is the user's distinction
  *  and not a storage detail — the backend spells the two differently on the
- *  wire. */
+ *  wire. `calendarId` moves the task to that list in the same save; `null`
+ *  leaves it where it is. */
 export const updateTask = (
   id: number,
   summary: string,
   dueMs: number | null,
   dueAllDay: boolean,
   notes: string | null,
-) => invoke<Task[]>('update_task', { id, summary, dueMs, dueAllDay, notes });
+  calendarId: number | null = null,
+) => invoke<Task[]>('update_task', { id, summary, dueMs, dueAllDay, notes, calendarId });
 
 /** Connects an iCloud or generic CalDAV account. Resolves to the account's
  *  display email once discovery has accepted the credentials. */

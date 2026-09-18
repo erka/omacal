@@ -1411,15 +1411,23 @@ export function installTauriStub(scenario: string): Harness {
         const limit = args.limit as number;
         return { tasks: hits.slice(offset, offset + limit), more: hits.length > offset + limit };
       }
-      case 'update_task':
+      // A `calendarId` moves the row to that list, as the backend's move
+      // does: same id, the new list's name and colour.
+      case 'update_task': {
+        const to = taskLists.find((l) => l.calendarId === args.calendarId);
+        if (args.calendarId != null && !to) {
+          throw new Error('that is not a task list you can add to');
+        }
         taskRows = taskRows.map((t) => t.id === args.id ? {
           ...t,
           summary: args.summary as string,
           dueMs: (args.dueMs as number | null) ?? null,
           dueAllDay: args.dueAllDay as boolean,
           notes: (args.notes as string | null) ?? null,
+          ...(to ? { calendarId: to.calendarId, calendar: to.name, color: to.color } : {}),
         } : t);
         return taskRows;
+      }
       case 'delete_task_cmd':
         taskRows = taskRows.filter((t) => t.id !== args.id);
         return taskRows;

@@ -218,6 +218,17 @@ const SAFE_EXACT: &[&str] = &[
     // two calendars, only the user can say which copy to delete, and nothing
     // else in the app will ever tell them.
     crate::events::MOVED_NOT_REMOVED,
+    // src-tauri/src/tasks.rs — `move_resource`'s three outcomes short of a
+    // move, reached through `update_task`'s `.map_err(user_facing)` by bare
+    // `?`s with no `.context(..)`. Fixed literals; the transport errors behind
+    // them are logged there and never interpolated. `TASK_ON_BOTH_LISTS` is
+    // `MOVED_NOT_REMOVED`'s case for tasks and must reach the user for the
+    // same reason. `TASK_NOT_MOVED` says the save did nothing to the list,
+    // which OPAQUE would leave them to guess. `TASK_CHANGED_ON_SERVER` names
+    // the one fix there is: sync, then save again.
+    crate::tasks::TASK_NOT_MOVED,
+    crate::tasks::TASK_ON_BOTH_LISTS,
+    crate::tasks::TASK_CHANGED_ON_SERVER,
 ];
 
 /// The generic replacement. Deliberately says where to look rather than
@@ -501,6 +512,11 @@ mod tests {
             crate::export::EXPORT_FAILED,
             crate::export::EXPORT_DISMISSED,
             crate::export::EXPORT_GONE,
+            // A task move's outcomes short of a move: fixed literals, the
+            // causes logged in `tasks::move_resource`, no context added.
+            crate::tasks::TASK_NOT_MOVED,
+            crate::tasks::TASK_ON_BOTH_LISTS,
+            crate::tasks::TASK_CHANGED_ON_SERVER,
         ];
         for expected in EXPECTED {
             assert!(

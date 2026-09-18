@@ -144,7 +144,7 @@ async fn task_home(state: &AppState, calendar_id: i64) -> anyhow::Result<TaskHom
     Ok(TaskHome::Server(Box::new(client), collection_url))
 }
 
-const TASK_CHANGED_ON_SERVER: &str =
+pub(crate) const TASK_CHANGED_ON_SERVER: &str =
     "That task changed on the server since it was loaded — sync and try again";
 
 #[tauri::command]
@@ -206,6 +206,9 @@ async fn set_completed_impl(state: &AppState, id: i64, on: bool) -> anyhow::Resu
 /// stamp. A due date resolves against the *calendar's* zone, the same one
 /// the sync reads it back in, so a task does not move a day when the
 /// display zone differs.
+///
+/// `calendar_id` moves the task to another list in the same save; `None`
+/// (or its own list) leaves it where it is. See [`move_resource`].
 #[tauri::command]
 pub async fn update_task(
     state: tauri::State<'_, AppState>,
@@ -214,14 +217,16 @@ pub async fn update_task(
     due_ms: Option<i64>,
     due_all_day: bool,
     notes: Option<String>,
+    calendar_id: Option<i64>,
 ) -> Result<Vec<TaskVm>, String> {
     crate::demo_sync_guard(state.demo)?;
-    update_impl(&state, id, &summary, due_ms, due_all_day, notes.as_deref())
+    update_impl(&state, id, &summary, due_ms, due_all_day, notes.as_deref(), calendar_id)
         .await
         .map_err(|e| crate::errors::user_facing(&e))?;
     list_tasks(state).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn update_impl(
     state: &AppState,
     id: i64,
@@ -229,6 +234,7 @@ async fn update_impl(
     due_ms: Option<i64>,
     due_all_day: bool,
     notes: Option<&str>,
+    to_list: Option<i64>,
 ) -> anyhow::Result<()> {
     let summary = summary.trim();
     if summary.is_empty() {
@@ -240,9 +246,18 @@ async fn update_impl(
         .await?
         .ok_or_else(|| anyhow::anyhow!(TASK_GONE))?;
     let raw = task.raw_ics.as_deref().ok_or_else(|| anyhow::anyhow!(TASK_GONE))?;
-    let home = task_home(state, task.calendar_id).await?;
+    let to_list = to_list.filter(|&to| to != task.calendar_id);
+    // The same refusal a create gets: only a list the window would offer.
+    if let Some(to) = to_list {
+        if !writable_task_lists(&state.pool).await?.iter().any(|l| l.calendar_id == to) {
+            anyhow::bail!(NOT_A_TASK_LIST);
+        }
+    }
+    // The list the task will live on. Its zone is the one a due date is
+    // written and read back in, so a moved task is written in its new list's.
+    let list = to_list.unwrap_or(task.calendar_id);
     let cal_tz: String = sqlx::query_scalar("SELECT timezone FROM calendars WHERE id = ?1")
-        .bind(task.calendar_id)
+        .bind(list)
         .fetch_one(&state.pool)
         .await?;
 
@@ -251,12 +266,39 @@ async fn update_impl(
     let edit = omacal_caldav::TodoEdit { summary, due, description: notes };
     let patched = omacal_caldav::patch_todo_fields(raw, &task.uid, &edit, &cal_tz, now)
         .ok_or_else(|| anyhow::anyhow!("could not rewrite the task's resource"))?;
+    let due_utc = due.as_ref().and_then(|d| stored_due_ms(d, &cal_tz));
+    let due_tz = due.is_some().then_some(cal_tz.as_str());
 
-    let new_etag = match &home {
+    if let Some(to) = to_list {
+        let from = task_home(state, task.calendar_id).await?;
+        let dest = task_home(state, to).await?;
+        let (href, etag) = move_resource(&from, &dest, &task, &patched).await?;
+        omacal_store::move_task(
+            &state.pool,
+            &omacal_store::StoredTask {
+                calendar_id: to,
+                etag,
+                caldav_href: href,
+                summary: Some(summary.to_string()),
+                description: notes.map(str::to_string),
+                due_utc,
+                due_tz: due_tz.map(str::to_string),
+                due_all_day,
+                updated_at: crate::now_ms(),
+                raw_ics: Some(patched),
+                ..task
+            },
+        )
+        .await?;
+        crate::upcoming::refresh_soon(state.pool.clone(), state.demo);
+        return Ok(());
+    }
+
+    let new_etag = match task_home(state, task.calendar_id).await? {
         TaskHome::Device => None,
         TaskHome::Server(client, _) => {
             let href = task.caldav_href.as_deref().ok_or_else(|| anyhow::anyhow!(TASK_GONE))?;
-            put_task(client, href, &patched, Written::Existing(task.etag.as_deref())).await?
+            put_task(&client, href, &patched, Written::Existing(task.etag.as_deref())).await?
         }
     };
 
@@ -265,8 +307,8 @@ async fn update_impl(
         id,
         summary,
         notes,
-        due.as_ref().and_then(|d| stored_due_ms(d, &cal_tz)),
-        due.is_some().then_some(cal_tz.as_str()),
+        due_utc,
+        due_tz,
         due_all_day,
         new_etag.as_deref(),
         &patched,
@@ -275,6 +317,66 @@ async fn update_impl(
     .await?;
     crate::upcoming::refresh_soon(state.pool.clone(), state.demo);
     Ok(())
+}
+
+/// Puts a task's resource on another list and takes it off its own, and
+/// answers with where it now lives: its href and etag on the new list, both
+/// `None` on this device.
+///
+/// The copy first, the original after, so a failure part-way never loses the
+/// task. A copy that is refused leaves everything as it was. An original that
+/// will not come off gets its copy taken back, and the task stays where it
+/// was; only when that fails too is the task on both lists, and the message
+/// says so rather than letting a second copy turn up on the next sync
+/// unexplained. The UID stays the same: a UID only has to be unique within
+/// one collection (RFC 4791 §5.3.2.1), and the resource is the same task.
+async fn move_resource(
+    from: &TaskHome,
+    to: &TaskHome,
+    task: &omacal_store::StoredTask,
+    ics: &str,
+) -> anyhow::Result<(Option<String>, Option<String>)> {
+    let old_href = match from {
+        TaskHome::Device => None,
+        TaskHome::Server(..) => {
+            Some(task.caldav_href.as_deref().ok_or_else(|| anyhow::anyhow!(TASK_GONE))?)
+        }
+    };
+
+    let (href, etag) = match to {
+        TaskHome::Device => (None, None),
+        TaskHome::Server(client, collection_url) => {
+            // Named afresh rather than after the UID, which another client
+            // may have written with characters a path cannot carry.
+            let href = format!(
+                "{}/{}.ics",
+                collection_url.trim_end_matches('/'),
+                uuid::Uuid::new_v4()
+            );
+            match put_task(client, &href, ics, Written::New).await {
+                Ok(etag) => (Some(href), etag),
+                Err(e) => {
+                    tracing::warn!(error = %format!("{e:#}"), "the new list refused the task's copy");
+                    anyhow::bail!(TASK_NOT_MOVED);
+                }
+            }
+        }
+    };
+
+    if let (TaskHome::Server(client, _), Some(old)) = (from, old_href) {
+        if let Err(e) = client.delete(old, task.etag.as_deref()).await {
+            let changed = matches!(e, omacal_caldav::CalDavError::PreconditionFailed);
+            tracing::warn!(error = %e, "the old list kept the task; taking the copy back");
+            if let (TaskHome::Server(dest, _), Some(copy)) = (to, href.as_deref()) {
+                if let Err(undo) = dest.delete(copy, etag.as_deref()).await {
+                    tracing::warn!(error = %undo, "could not take the copy back either");
+                    anyhow::bail!(TASK_ON_BOTH_LISTS);
+                }
+            }
+            anyhow::bail!(if changed { TASK_CHANGED_ON_SERVER } else { TASK_NOT_MOVED });
+        }
+    }
+    Ok((href, etag))
 }
 
 /// Whether a PUT makes a resource or replaces one, and what the row knows.
@@ -378,7 +480,7 @@ pub(crate) async fn update_body(
     notes: Option<&str>,
 ) -> Result<Vec<TaskVm>, String> {
     crate::demo_sync_guard(state.demo)?;
-    update_impl(state, id, summary, due_ms, due_all_day, notes)
+    update_impl(state, id, summary, due_ms, due_all_day, notes, None)
         .await
         .map_err(|e| crate::errors::user_facing(&e))?;
     Ok(list_body(state).await)
@@ -394,6 +496,16 @@ pub(crate) async fn list_body(state: &AppState) -> Vec<TaskVm> {
 }
 
 pub(crate) const TASK_NEEDS_A_TITLE: &str = "a task needs a title";
+/// A move that did not happen: the copy was refused, or the original would
+/// not come off its list and the copy was taken back.
+pub(crate) const TASK_NOT_MOVED: &str =
+    "The task could not be moved to that list — it is still on the old one.";
+/// A move that half happened, which the next sync would otherwise show as a
+/// second copy with no word of why. Worded as `events::MOVED_NOT_REMOVED` is,
+/// for the same situation.
+pub(crate) const TASK_ON_BOTH_LISTS: &str =
+    "The task is now on the list you chose, but OmaCal could not take it off the \
+     old one — it is on both. Delete the copy on the old list.";
 pub(crate) const TASK_GONE: &str = "that task is no longer here";
 pub(crate) const NOT_A_TASK_LIST: &str =
     "that is not a task list you can add to — `omacal tasks` names the lists in each row";
@@ -795,7 +907,7 @@ mod tests {
 
         // A due date, a note and a new title, in one write.
         let due: i64 = "2026-09-18T00:00:00+03:00".parse::<jiff::Timestamp>().unwrap().as_millisecond();
-        update_impl(&state, id, "Water the plants twice", Some(due), true, Some("the big one"))
+        update_impl(&state, id, "Water the plants twice", Some(due), true, Some("the big one"), None)
             .await
             .unwrap();
         let t = omacal_store::task_by_id(&pool, id).await.unwrap().unwrap();
@@ -1066,5 +1178,158 @@ mod tests {
         assert!(!row.due_all_day, "an hour was given, so it is not all-day");
         assert_eq!(row.due_utc, Some(at));
         assert!(row.raw_ics.as_deref().is_some_and(|r| r.contains("DUE;TZID=Europe/Sofia:20260918T100000")));
+    }
+
+    /// **A task moves to another list in the save that edits it** (Plamen,
+    /// 2026-09-18: "how to change it from one list to another?"). The row
+    /// keeps its id, and an all-day due is written in the new list's zone, so
+    /// it names the same day there as it did before.
+    #[tokio::test]
+    async fn a_task_moves_between_lists_on_this_device_and_keeps_its_day() {
+        let pool = omacal_store::connect_memory().await.unwrap();
+        let home = omacal_store::ensure_local_task_list(&pool, LOCAL_TASK_LIST_NAME, "Europe/Sofia", 0)
+            .await
+            .unwrap();
+        let errands = omacal_store::create_local_list(&pool, "Errands", "America/New_York", "#5aa84f", 0)
+            .await
+            .unwrap();
+        let state = local_state(pool.clone());
+        create_impl(&state, home, "Buy stamps", None, true).await.unwrap();
+        let id = omacal_store::tasks_for_ui(&pool, 0).await.unwrap()[0].task.id;
+
+        let due: i64 = "2026-09-24T12:00:00Z".parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        let day = jiff::Timestamp::from_millisecond(due).unwrap().to_zoned(jiff::tz::TimeZone::system()).date();
+        update_impl(&state, id, "Buy stamps", Some(due), true, Some("two books"), Some(errands))
+            .await
+            .unwrap();
+        let t = omacal_store::task_by_id(&pool, id).await.unwrap().unwrap();
+        assert_eq!(t.calendar_id, errands, "on the new list, as the same row");
+        assert_eq!(t.description.as_deref(), Some("two books"), "and the edit came with it");
+        assert_eq!(t.due_tz.as_deref(), Some("America/New_York"));
+        assert_eq!(due_date(t.due_utc.unwrap(), t.due_tz.as_deref()), day, "the same day, in its new zone");
+        assert!(t.caldav_href.is_none() && t.etag.is_none(), "still nothing to address");
+        assert_eq!(omacal_store::tasks_for_ui(&pool, 0).await.unwrap().len(), 1, "moved, not copied");
+
+        // A list that is not one is refused, and the task stays put.
+        let refused = update_impl(&state, id, "Buy stamps", None, true, None, Some(9_999)).await.unwrap_err();
+        assert_eq!(refused.to_string(), NOT_A_TASK_LIST);
+        assert_eq!(omacal_store::task_by_id(&pool, id).await.unwrap().unwrap().calendar_id, errands);
+    }
+
+    /// `move_resource` against a CalDAV server, one per way it can go. The
+    /// server is a wiremock with two collections, `/a/` and `/b/`.
+    mod moving {
+        use super::super::*;
+        use wiremock::matchers::{header, method, path, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        fn on_server(server: &MockServer, collection: &str) -> TaskHome {
+            let client = omacal_caldav::CalDavClient::new(&server.uri(), "u", "p").unwrap();
+            TaskHome::Server(Box::new(client), format!("{}/{collection}/", server.uri()))
+        }
+
+        fn task_at(server: &MockServer) -> omacal_store::StoredTask {
+            omacal_store::StoredTask {
+                id: 7, calendar_id: 1, uid: "task-1@example.com".into(),
+                etag: Some("\"old\"".into()), caldav_href: Some(format!("{}/a/t1.ics", server.uri())),
+                summary: Some("Buy stamps".into()), description: None, due_utc: None, due_tz: None,
+                due_all_day: false, status: "needs-action".into(), completed_utc: None, priority: 0,
+                updated_at: 0, raw_ics: None,
+            }
+        }
+
+        async fn methods(server: &MockServer) -> Vec<(String, String)> {
+            server.received_requests().await.unwrap().into_iter()
+                .filter(|r| r.method.as_str() != "PROPFIND")
+                .map(|r| (r.method.to_string(), r.url.path().to_string()))
+                .collect()
+        }
+
+        /// The copy lands on the new list before the original leaves the old
+        /// one, guarded both ways: a create there, the known etag here.
+        #[tokio::test]
+        async fn a_move_between_two_server_lists_copies_first_and_removes_second() {
+            let server = MockServer::start().await;
+            Mock::given(method("PUT")).and(path_regex(r"^/b/[0-9a-f-]+\.ics$")).and(header("If-None-Match", "*"))
+                .respond_with(ResponseTemplate::new(201).insert_header("ETag", "\"new\""))
+                .expect(1).mount(&server).await;
+            Mock::given(method("DELETE")).and(path("/a/t1.ics")).and(header("If-Match", "\"old\""))
+                .respond_with(ResponseTemplate::new(204)).expect(1).mount(&server).await;
+
+            let (href, etag) = move_resource(&on_server(&server, "a"), &on_server(&server, "b"),
+                                             &task_at(&server), "BEGIN:VCALENDAR").await.unwrap();
+            assert!(href.as_deref().is_some_and(|h| h.starts_with(&format!("{}/b/", server.uri()))));
+            assert_eq!(etag.as_deref(), Some("\"new\""));
+            let seen = methods(&server).await;
+            assert_eq!(seen[0].0, "PUT", "the copy first: {seen:?}");
+            assert_eq!(seen[1], ("DELETE".into(), "/a/t1.ics".into()), "the original second");
+        }
+
+        /// From this device to a server is a create there and nothing else;
+        /// from a server to this device is a delete there and nothing else.
+        #[tokio::test]
+        async fn a_move_to_or_from_this_device_touches_only_the_server_end() {
+            let server = MockServer::start().await;
+            Mock::given(method("PUT")).and(path_regex(r"^/b/")).and(header("If-None-Match", "*"))
+                .respond_with(ResponseTemplate::new(201).insert_header("ETag", "\"new\""))
+                .expect(1).mount(&server).await;
+            Mock::given(method("DELETE")).and(path("/a/t1.ics"))
+                .respond_with(ResponseTemplate::new(204)).expect(1).mount(&server).await;
+
+            let mut local = task_at(&server);
+            local.caldav_href = None;
+            local.etag = None;
+            let (href, _) = move_resource(&TaskHome::Device, &on_server(&server, "b"), &local, "X")
+                .await.unwrap();
+            assert!(href.is_some());
+            let (href, etag) = move_resource(&on_server(&server, "a"), &TaskHome::Device,
+                                             &task_at(&server), "X").await.unwrap();
+            assert_eq!((href, etag), (None, None), "nothing to address on this device");
+        }
+
+        /// A new list that refuses the copy: nothing else is sent, and the
+        /// task is where it was.
+        #[tokio::test]
+        async fn a_refused_copy_leaves_the_original_alone() {
+            let server = MockServer::start().await;
+            Mock::given(method("PUT")).respond_with(ResponseTemplate::new(403)).mount(&server).await;
+            Mock::given(method("DELETE")).respond_with(ResponseTemplate::new(204)).expect(0).mount(&server).await;
+
+            let err = move_resource(&on_server(&server, "a"), &on_server(&server, "b"),
+                                    &task_at(&server), "X").await.unwrap_err();
+            assert_eq!(err.to_string(), TASK_NOT_MOVED);
+        }
+
+        /// An original that will not come off its list: the copy is taken
+        /// back, so the task is on one list, not two. A 412 says why.
+        #[tokio::test]
+        async fn an_original_that_will_not_leave_gets_its_copy_taken_back() {
+            for (status, says) in [(500, TASK_NOT_MOVED), (412, TASK_CHANGED_ON_SERVER)] {
+                let server = MockServer::start().await;
+                Mock::given(method("PUT")).and(path_regex(r"^/b/"))
+                    .respond_with(ResponseTemplate::new(201).insert_header("ETag", "\"new\""))
+                    .mount(&server).await;
+                Mock::given(method("DELETE")).and(path("/a/t1.ics"))
+                    .respond_with(ResponseTemplate::new(status)).mount(&server).await;
+                Mock::given(method("DELETE")).and(path_regex(r"^/b/")).and(header("If-Match", "\"new\""))
+                    .respond_with(ResponseTemplate::new(204)).expect(1).mount(&server).await;
+
+                let err = move_resource(&on_server(&server, "a"), &on_server(&server, "b"),
+                                        &task_at(&server), "X").await.unwrap_err();
+                assert_eq!(err.to_string(), says, "{status}");
+            }
+        }
+
+        /// And when the copy will not come back either, the task is on both
+        /// lists, and the message says so.
+        #[tokio::test]
+        async fn a_copy_that_cannot_be_taken_back_is_reported_on_both_lists() {
+            let server = MockServer::start().await;
+            Mock::given(method("PUT")).respond_with(ResponseTemplate::new(201)).mount(&server).await;
+            Mock::given(method("DELETE")).respond_with(ResponseTemplate::new(500)).mount(&server).await;
+            let err = move_resource(&on_server(&server, "a"), &on_server(&server, "b"),
+                                    &task_at(&server), "X").await.unwrap_err();
+            assert_eq!(err.to_string(), TASK_ON_BOTH_LISTS);
+        }
     }
 }

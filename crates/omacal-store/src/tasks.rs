@@ -291,6 +291,74 @@ pub async fn update_task_fields(
     Ok(())
 }
 
+/// Moves a task row to another list, keeping its id — after (never before)
+/// both ends took the move. Every column comes from `t`, and `t.id` names the
+/// row.
+///
+/// A sync can run between the PUT onto the new list and this write. If the
+/// new list's sync ran, it already stored the moved task as a row of its own,
+/// which the `(calendar_id, uid)` key would refuse a second of, so that copy
+/// is dropped first. If the old list's sync ran, it already deleted this row,
+/// so the task is inserted again rather than vanishing until the next sync.
+pub async fn move_task(pool: &SqlitePool, t: &StoredTask) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM tasks WHERE calendar_id = ?1 AND uid = ?2 AND id <> ?3")
+        .bind(t.calendar_id)
+        .bind(&t.uid)
+        .bind(t.id)
+        .execute(&mut *tx)
+        .await?;
+    let moved = sqlx::query(
+        "UPDATE tasks SET calendar_id = ?2, etag = ?3, caldav_href = ?4, summary = ?5,
+            description = ?6, due_utc = ?7, due_tz = ?8, due_all_day = ?9, status = ?10,
+            completed_utc = ?11, priority = ?12, updated_at = ?13, raw_ics = ?14
+         WHERE id = ?1",
+    )
+    .bind(t.id)
+    .bind(t.calendar_id)
+    .bind(&t.etag)
+    .bind(&t.caldav_href)
+    .bind(&t.summary)
+    .bind(&t.description)
+    .bind(t.due_utc)
+    .bind(&t.due_tz)
+    .bind(t.due_all_day as i64)
+    .bind(&t.status)
+    .bind(t.completed_utc)
+    .bind(t.priority)
+    .bind(t.updated_at)
+    .bind(&t.raw_ics)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if moved == 0 {
+        sqlx::query(
+            "INSERT INTO tasks
+                (calendar_id, uid, etag, caldav_href, summary, description, due_utc,
+                 due_tz, due_all_day, status, completed_utc, priority, updated_at, raw_ics)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        )
+        .bind(t.calendar_id)
+        .bind(&t.uid)
+        .bind(&t.etag)
+        .bind(&t.caldav_href)
+        .bind(&t.summary)
+        .bind(&t.description)
+        .bind(t.due_utc)
+        .bind(&t.due_tz)
+        .bind(t.due_all_day as i64)
+        .bind(&t.status)
+        .bind(t.completed_utc)
+        .bind(t.priority)
+        .bind(t.updated_at)
+        .bind(&t.raw_ics)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Deletes one task row — after (never before) the server delete succeeded.
 pub async fn delete_task(pool: &SqlitePool, id: i64) -> anyhow::Result<u64> {
     Ok(sqlx::query("DELETE FROM tasks WHERE id = ?1")
@@ -472,5 +540,46 @@ mod tests {
         assert_eq!(got.completed_utc, Some(42));
         assert_eq!(got.etag.as_deref(), Some("\"2\""));
         assert_eq!(got.raw_ics.as_deref(), Some("BEGIN:VCALENDAR..."), "None left it alone");
+    }
+
+    /// A move keeps the row's id, whichever sync ran in the middle of it: a
+    /// copy the new list's sync already stored is dropped, and a row the old
+    /// list's sync already deleted comes back rather than vanishing.
+    #[tokio::test]
+    async fn a_moved_task_keeps_its_id_whichever_sync_got_there_first() {
+        let (pool, _) = seeded().await;
+        sqlx::query(
+            "INSERT INTO calendars (account_id, google_id, summary, timezone, access_role,
+                                    supports_events, supports_tasks)
+             VALUES (1, '/cal/errands/', 'Errands', 'UTC', 'owner', 0, 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let id = upsert_task(&pool, &task("a", None)).await.unwrap();
+
+        // The new list's sync stored its own copy already.
+        let mut synced = task("a", None);
+        synced.calendar_id = 2;
+        upsert_task(&pool, &synced).await.unwrap();
+
+        let mut moved = task_by_id(&pool, id).await.unwrap().unwrap();
+        moved.calendar_id = 2;
+        moved.caldav_href = Some("/cal/errands/x.ics".into());
+        moved.etag = Some("\"9\"".into());
+        move_task(&pool, &moved).await.unwrap();
+        let rows = tasks_for_ui(&pool, 0).await.unwrap();
+        assert_eq!(rows.len(), 1, "one task, not the moved row and the synced copy");
+        assert_eq!(rows[0].task.id, id);
+        assert_eq!(rows[0].task.calendar_id, 2);
+        assert_eq!(rows[0].task.caldav_href.as_deref(), Some("/cal/errands/x.ics"));
+
+        // The old list's sync deleted the row before the move was written.
+        delete_task(&pool, id).await.unwrap();
+        moved.calendar_id = 1;
+        move_task(&pool, &moved).await.unwrap();
+        let rows = tasks_for_ui(&pool, 0).await.unwrap();
+        assert_eq!(rows.len(), 1, "written again, not lost");
+        assert_eq!((rows[0].task.calendar_id, rows[0].task.uid.as_str()), (1, "a"));
     }
 }

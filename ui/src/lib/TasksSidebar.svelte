@@ -5,6 +5,7 @@
   import { weekStartDay } from './weekstartstore.svelte';
   import DateField from './DateField.svelte';
   import TimeField from './TimeField.svelte';
+  import ListPicker, { type ListChoice } from './ListPicker.svelte';
   import { clockFormat } from './clock.svelte';
   import {
     createLocalTaskList, createTask, createTaskList, deleteTask, deleteTaskList, renameTaskList,
@@ -27,8 +28,8 @@
    *  changes which tasks are here — only the headings they sit under.
    *
    *  A row opens in place for editing. That is the whole of what a task can
-   *  be given here: a title, a due date and a note, which is exactly what a
-   *  VTODO carries and this app can write back. */
+   *  be given here: a title, a due date, a note and the list it is on, which
+   *  is exactly what a VTODO carries and this app can write back. */
   let { onclose, width = TASKS_WIDTH_DEFAULT, onresize }: {
     onclose: () => void;
     /** The panel's width in pixels (#130). The caller owns it, because the
@@ -91,9 +92,12 @@
   let filterListId = $state<number | null>(null);
   let adding = $state(false);
 
-  /** The row open for editing, and its fields while they are being typed. */
+  /** The row open for editing, and its fields while they are being typed.
+   *  `list` is the list it will be on after Save: the one it is on, until
+   *  another is picked (Plamen, 2026-09-18: the editor did not say which list
+   *  a task was on, or offer another). */
   let editingId = $state<number | null>(null);
-  let draft = $state({ summary: '', date: '', time: '', notes: '' });
+  let draft = $state({ summary: '', date: '', time: '', notes: '', list: 0 });
   /** The time field holds something that is not a time. Save waits for it:
    *  saving would quietly make the task all-day. */
   let timeInvalid = $state(false);
@@ -297,6 +301,22 @@
   const listColor = (t: Task) =>
     t.color ?? lists.find((l) => l.calendarId === t.calendarId)?.color ?? 'var(--muted)';
 
+  /** What the add row's picker offers: where the next task goes. */
+  const addChoices = $derived<ListChoice[]>([
+    { id: null, name: 'All lists', color: null },
+    ...lists.map((l) => ({ id: l.calendarId, name: l.name, color: l.color })),
+  ]);
+
+  /** What the editor's picker offers: every list a task can be on, and the
+   *  one this task is on even if it is not among them, so the field never
+   *  shows nothing. */
+  const moveChoices = (t: Task): ListChoice[] => {
+    const all = lists.map((l) => ({ id: l.calendarId, name: l.name, color: l.color }));
+    return all.some((c) => c.id === t.calendarId)
+      ? all
+      : [{ id: t.calendarId, name: t.calendar, color: t.color }, ...all];
+  };
+
   async function toggle(task: Task) {
     if (busyIds.has(task.id)) return;
     note = null;
@@ -345,6 +365,7 @@
       date: task.dueMs === null ? '' : dateInputValue(task.dueMs),
       time: timeInputValue(task),
       notes: task.notes ?? '',
+      list: task.calendarId,
     };
   }
 
@@ -359,9 +380,11 @@
     saving = true;
     note = null;
     const { ms, allDay } = dueFromInputs(draft.date, draft.time);
+    const from = (tasks ?? []).find((t) => t.id === editingId)?.calendarId;
     try {
       setTaskRows(await updateTask(
         editingId, draft.summary, ms, allDay, draft.notes.trim() || null,
+        draft.list !== from ? draft.list : null,
       ));
       nowMs = Date.now();
       editingId = null;
@@ -419,12 +442,8 @@
         disabled={adding}
       />
       {#if lists.length > 1}
-        <select aria-label="Task list" bind:value={filterListId} disabled={adding}>
-          <option value={null}>All lists</option>
-          {#each lists as l (l.calendarId)}
-            <option value={l.calendarId}>{l.name}</option>
-          {/each}
-        </select>
+        <ListPicker label="Task list" choices={addChoices} value={filterListId} disabled={adding}
+                    onpick={(id) => (filterListId = id)} />
       {/if}
       <!-- A list of its own for what is being added: made on this device,
            named where "By list" shows the lists. -->
@@ -503,6 +522,13 @@
             <div class="editor">
               <input class="etitle" aria-label="Task title" bind:value={draft.summary}
                      disabled={saving} />
+              <!-- Which list it is on, and the way to another: moved when
+                   Save is pressed, with the rest of the edit. -->
+              <div class="elist">
+                <ListPicker compact label="List" choices={moveChoices(t)} value={draft.list}
+                            disabled={saving || lists.length < 2}
+                            onpick={(id) => { if (id !== null) draft = { ...draft, list: id }; }} />
+              </div>
               <div class="quick">
                 <button onclick={() => setQuick('today')} disabled={saving}>Today</button>
                 <button onclick={() => setQuick('tomorrow')} disabled={saving}>Tomorrow</button>
@@ -667,8 +693,6 @@
   .add { display: flex; gap: 6px; margin: 0 12px 10px; }
   .add input { flex-grow: 1; min-width: 0; font: inherit; padding: 7px 10px; border-radius: 7px;
                border: 1px solid var(--hairline); background: var(--surface); color: var(--text); }
-  .add select { font: inherit; border-radius: 7px; border: 1px solid var(--hairline);
-                background: var(--surface); color: var(--text); padding: 0 6px; max-width: 96px; }
   .newlist { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto;
              width: 30px; border-radius: 7px; border: 1px solid var(--hairline); cursor: pointer;
              background: var(--surface); color: var(--text); padding: 0; }
@@ -724,6 +748,7 @@
   .etitle { font: inherit; font-weight: 500; color: var(--text); background: none; border: 0;
             border-bottom: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
             padding: 0 0 3px; }
+  .elist { display: flex; min-width: 0; }
   .quick { display: flex; flex-wrap: wrap; gap: 4px; }
   .quick button { appearance: none; -webkit-appearance: none; font: inherit; font-size: 11px;
                   padding: 3px 8px; border-radius: 5px; border: 0; cursor: pointer;
