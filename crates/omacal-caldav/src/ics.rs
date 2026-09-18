@@ -941,6 +941,18 @@ pub fn new_todo_ics(uid: &str, summary: &str, due: Option<&IcsTime>, now: Timest
                 ));
             }
         }
+        // A bare date has no time to alarm at. A timed due needs one: unlike
+        // an event, a task has no reminders UI yet, and Reminders itself
+        // stamps a VALARM on every timed reminder it creates — without this,
+        // an omacal-created task carries nothing for the phone (or Omarchy)
+        // to fire on.
+        if !matches!(due, IcsTime::Date(_)) {
+            lines.push("BEGIN:VALARM".to_string());
+            lines.push("ACTION:DISPLAY".to_string());
+            lines.push("DESCRIPTION:Reminder".to_string());
+            lines.push("TRIGGER:PT0M".to_string());
+            lines.push("END:VALARM".to_string());
+        }
     }
     lines.push("END:VTODO".to_string());
     lines.push("END:VCALENDAR".to_string());
@@ -2350,6 +2362,34 @@ END:VEVENT\r\nEND:VCALENDAR";
             ms,
             "2026-09-11T15:30:00+03:00[Europe/Sofia]".parse::<jiff::Zoned>().unwrap().timestamp().as_millisecond()
         );
+    }
+
+    /// A task due at a specific time needs a `VALARM` of its own: unlike
+    /// Reminders on the phone, which stamps one onto every timed reminder it
+    /// creates, omacal wrote a bare `DUE` and nothing fired anywhere —
+    /// neither the phone (nothing in the resource to alert on) nor Omarchy.
+    #[test]
+    fn a_new_todo_with_a_time_gets_a_valarm_at_its_due() {
+        let now = Timestamp::from_millisecond(1_786_352_400_000).unwrap();
+        let due = IcsTime::Zoned {
+            dt: jiff::civil::date(2026, 9, 11).at(15, 30, 0, 0),
+            tzid: "Europe/Sofia".to_string(),
+        };
+        let ics = new_todo_ics("new-3", "Call", Some(&due), now);
+        assert!(ics.contains("BEGIN:VALARM"), "{ics}");
+        assert!(ics.contains("ACTION:DISPLAY"), "{ics}");
+        assert!(ics.contains("TRIGGER:PT0M"), "{ics}");
+        assert!(ics.contains("END:VALARM"), "{ics}");
+    }
+
+    /// A bare-date due has no time to alarm at — an all-day task must not
+    /// grow a `VALARM` it can't honor.
+    #[test]
+    fn a_new_todo_with_only_a_date_gets_no_valarm() {
+        let now = Timestamp::from_millisecond(1_786_352_400_000).unwrap();
+        let due = IcsTime::Date(Date::new(2026, 8, 20).unwrap());
+        let ics = new_todo_ics("new-4", "Fix the thing", Some(&due), now);
+        assert!(!ics.contains("VALARM"), "{ics}");
     }
 
     /// An invitation resource the way iCloud actually ships one: the user's
