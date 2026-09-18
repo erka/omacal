@@ -2359,7 +2359,7 @@ test.describe('EventPopover', () => {
           value: { writeText: async (value: string) => { (window as any).__fieldCopy = value; } },
         });
       });
-      const copy = page.getByRole('button', { name: 'Copy meeting link' });
+      const copy = page.getByRole('button', { name: 'Copy link to the video call' });
       await copy.click();
       await expect.poll(() => page.evaluate(() => (window as any).__fieldCopy)).toBe(url);
       await expect(page.locator('.pop .note')).toHaveText('Copied meeting link');
@@ -2385,21 +2385,21 @@ test.describe('EventPopover', () => {
         value: { writeText: async () => { throw new Error('denied'); } },
       });
     });
-    await page.getByRole('button', { name: 'Copy meeting link' }).click();
+    await page.getByRole('button', { name: 'Copy link to the video call' }).click();
     await expect(page.locator('.pop .note.err')).toHaveText('Could not copy meeting link. Try again.');
     await page.evaluate(() => {
       Object.defineProperty(navigator, 'clipboard', {
         configurable: true, value: { writeText: async () => {} },
       });
     });
-    await page.getByRole('button', { name: 'Copy meeting link' }).click();
+    await page.getByRole('button', { name: 'Copy link to the video call' }).click();
     await expect(page.locator('.pop .note')).toHaveText('Copied meeting link');
   });
 
   test('copy meeting link is absent when there is no video call', async ({ page }) => {
     await page.goto(show('standup'));
     await expect(page.locator('.pop')).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Copy meeting link' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Copy link to the video call' })).toHaveCount(0);
   });
 
   test('the panel never scrolls sideways, whatever a field holds', async ({ page }) => {

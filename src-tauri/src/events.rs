@@ -574,8 +574,7 @@ pub(crate) fn resolve_instance_id(
     }
 }
 
-/// Copies onto `row` the fields a patch (or a refresh) response actually
-/// carries: `etag` and `sequence`, so the next write's conflict check is
+/// Copies onto `row` the fields a patch response actually carries: `etag` and `sequence`, so the next write's conflict check is
 /// against the new version; `attendees`, so the guest list reflects what
 /// Google now has; and `self_response`, derived the same way sync derives it
 /// — Google does not return it as a field of its own — so the week grid's
@@ -867,23 +866,42 @@ async fn refresh_impl(state: &AppState, id: i64) -> anyhow::Result<EventDetail> 
     let token = crate::access_token_for(state, &cfg, &account_email).await?;
     let client = omacal_google::CalendarClient::new(crate::GOOGLE_CALENDAR_API, &token);
 
-    refresh_via_client(&state.pool, ev, &cal_google_id, &client).await?;
+    if refresh_via_client(&state.pool, ev, &cal_google_id, &client).await? {
+        // A repaired Join link belongs in the bar widget's feed too, not only
+        // in the popover that asked.
+        crate::upcoming::refresh_soon(state.pool.clone(), state.demo);
+    }
     event_detail_impl(state, id).await
 }
 
+/// The Google half of [`refresh_impl`], split out so it runs against a
+/// wiremock server the way [`respond_via_client`] does. Returns whether the
+/// row was written.
+///
+/// A full GET carries the conference, description and location too, so the
+/// row goes through [`row_from_wire`], the mapping sync uses, rather than the
+/// RSVP-only [`merge_patched`]: that merge left old Zoom links missing even
+/// after opening the event had fetched a perfectly good video entry point.
+///
+/// Nothing is written until the GET succeeded and `row_from_wire` accepted
+/// it, which is what keeps an offline or failed refresh harmless. Nor when the
+/// stored etag moved while the GET was out: a sync, a reply or an edit landed
+/// in between, its copy is at least as fresh as this one, and writing this one
+/// would put back every synced column as Google had it a moment earlier.
 async fn refresh_via_client(
     pool: &SqlitePool,
     ev: omacal_store::StoredEvent,
     cal_google_id: &str,
     client: &omacal_google::CalendarClient,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let fresh = client.get_event(cal_google_id, &ev.google_id).await?;
-    // A full GET contains the conference, description and location too.
-    // The RSVP-only merge left old Zoom links missing even after opening
-    // the event fetched a perfectly good conferenceData video entry point.
     let row = row_from_wire(&fresh, ev.calendar_id, &ev.calendar_timezone)?;
+    let stored_etag = omacal_store::event_by_id(pool, ev.id).await?.map(|(now, _, _)| now.etag);
+    if stored_etag != Some(ev.etag) {
+        return Ok(false);
+    }
     omacal_store::upsert_event(pool, &row).await?;
-    Ok(())
+    Ok(true)
 }
 
 #[tauri::command]
@@ -3482,12 +3500,45 @@ mod tests {
                 .expect(1).mount(&server).await;
             let client = omacal_google::CalendarClient::new(server.uri(), "test-token");
             let (before, _, _) = omacal_store::event_by_id(&pool, id).await.unwrap().unwrap();
-            refresh_via_client(&pool, before, "primary", &client).await.unwrap();
+            assert!(refresh_via_client(&pool, before, "primary", &client).await.unwrap(), "{uri:?}");
             let (after, _, _) = omacal_store::event_by_id(&pool, id).await.unwrap().unwrap();
             assert_eq!(after.conference_uri.as_deref(), uri);
             assert_eq!(after.id, id);
             assert_eq!(after.recurrence, cached.recurrence);
         }
+    }
+
+    /// Opening a popover fires a refresh, and a sync or a reply can land while
+    /// its GET is out. Now that a refresh writes every synced column, not just
+    /// the RSVP ones, the slower answer must not win: the stored row moved on
+    /// (a new etag), so the refresh leaves it alone.
+    #[tokio::test]
+    async fn a_refresh_overtaken_by_a_newer_write_leaves_the_newer_row_alone() {
+        let (pool, id) = seeded_pool_with(&stored(vec![])).await;
+        let (before, _, _) = omacal_store::event_by_id(&pool, id).await.unwrap().unwrap();
+
+        // The write that lands while the GET is out: a sync with a new title.
+        let mut newer = before.clone();
+        newer.etag = Some("\"newer\"".into());
+        newer.summary = Some("Renamed elsewhere".into());
+        omacal_store::upsert_event(&pool, &newer).await.unwrap();
+
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/calendars/primary/events/ev1"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "ev1", "status": "confirmed", "summary": "The title a moment ago",
+                "etag": "\"old\"",
+                "start": { "dateTime": "2026-09-16T07:30:00-05:00" },
+                "end": { "dateTime": "2026-09-16T08:10:00-05:00" }
+            })))
+            .expect(1).mount(&server).await;
+        let client = omacal_google::CalendarClient::new(server.uri(), "test-token");
+
+        assert!(!refresh_via_client(&pool, before, "primary", &client).await.unwrap());
+        let (after, _, _) = omacal_store::event_by_id(&pool, id).await.unwrap().unwrap();
+        assert_eq!(after.summary.as_deref(), Some("Renamed elsewhere"));
+        assert_eq!(after.etag.as_deref(), Some("\"newer\""));
     }
 
     // --- respond_via_client: reachable without touching load_config or the

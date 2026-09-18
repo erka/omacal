@@ -2707,6 +2707,10 @@ export const FIXTURES: Record<string, Record<string, any>> = {
     },
   },
   EventPopover: {
+    // Copy link on a calendar the user cannot edit: copying is reading, so it
+    // stays. Google's conference field and a *different* Zoom link in
+    // `location` at once, which proves the copied URL is the one Join opens
+    // (`conference_uri` wins), not whichever link the popover met first.
     'readonly-conference': {
       detail: detail({
         id: 70, title: 'Project catch-up', can_edit: false,

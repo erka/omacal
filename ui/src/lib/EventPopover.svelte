@@ -224,9 +224,11 @@
    * because it is the only one that cannot be a coincidence; `location`
    * before `description` matches `open_conference`'s own order
    * (`conference_join_url` in `upcoming.rs`), which is what actually runs
-   * when this is clicked — this derivation only has to agree with it, not
-   * decide anything, since it drives the displayed `href` and the
-   * `locationShown` echo check below, not the click itself.
+   * when Join is clicked. So this does not decide what Join opens, but it is
+   * what Copy link copies, besides the displayed `href` and the
+   * `locationShown` echo check below — and "copies the link Join opens" holds
+   * only while two implementations agree: `meetingUrl` in `location.ts` and
+   * `first_recognised_url` in `upcoming.rs`. Change one, change both.
    */
   const joinUrl = $derived(
     detail.conference_uri ?? meetingUrl(detail.location) ?? meetingUrl(detail.description),
@@ -538,7 +540,7 @@
       <a class="conf" href={joinUrl} target="_blank" rel="noopener noreferrer"
          data-copy-label="meeting link" data-copy-value={joinUrl}
          onclick={(e) => { e.preventDefault(); void openConference(detail.id); }}>Join video call</a>
-      <button type="button" class="copy-conference" aria-label="Copy meeting link"
+      <button type="button" class="copy-conference" aria-label="Copy link to the video call"
               data-copy-label="meeting link" data-copy-value={joinUrl}
               onclick={() => copyField(joinUrl!, 'meeting link')}>Copy link</button>
     </div>

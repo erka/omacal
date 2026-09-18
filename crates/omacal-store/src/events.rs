@@ -1628,11 +1628,14 @@ mod tests {
         only_this.run(pool).await.unwrap();
     }
 
+    /// 0015's backfill: a Google event cached before v0.17.0 imported
+    /// conferenceData, and unchanged since, has no Join link and is never
+    /// re-delivered by an incremental sync. Dropping Google's cursors is what
+    /// makes the next sync a full window fetch; CalDAV's ctags live in the
+    /// same table and must survive, and so must the cached events.
     #[tokio::test]
     async fn conference_backfill_resets_google_cursors_but_preserves_caldav_and_events() {
-        // Reproduce an upgrade from the pre-contacts store, where these
-        // events were imported without conferenceData support.
-        let pool = pool_migrated_below(14, 13).await;
+        let pool = pool_migrated_below(15, 14).await;
         let (google_cal, dav_cal) = seed_two_accounts(&pool).await;
         sqlx::query("UPDATE accounts SET provider = 'caldav' WHERE id = 1")
             .execute(&pool).await.unwrap();
