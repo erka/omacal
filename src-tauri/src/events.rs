@@ -853,9 +853,8 @@ async fn refresh_event_impl(state: &AppState, id: i64) -> Result<EventDetail, St
     refresh_impl(state, id).await.map_err(|e| crate::errors::user_facing(&e))
 }
 
-/// Re-pulls one event from Google and folds it back in, the same shape as
-/// `respond_via_client` minus the patch: `get_event`, [`merge_patched`],
-/// `upsert_event`, then the fresh detail. Used to pick up a change made
+/// Re-pulls one event from Google through the same mapping as sync, then
+/// returns its fresh detail. Used to pick up a change made
 /// elsewhere — another attendee's answer, a moved time — while the popover was
 /// open. Its failures are the caller's to ignore: whatever `EventDetail` is
 /// already on screen is still valid if this does not succeed.
@@ -868,13 +867,23 @@ async fn refresh_impl(state: &AppState, id: i64) -> anyhow::Result<EventDetail> 
     let token = crate::access_token_for(state, &cfg, &account_email).await?;
     let client = omacal_google::CalendarClient::new(crate::GOOGLE_CALENDAR_API, &token);
 
-    let fresh = client.get_event(&cal_google_id, &ev.google_id).await?;
-
-    let mut row = ev;
-    merge_patched(&mut row, &fresh);
-    omacal_store::upsert_event(&state.pool, &row).await?;
-
+    refresh_via_client(&state.pool, ev, &cal_google_id, &client).await?;
     event_detail_impl(state, id).await
+}
+
+async fn refresh_via_client(
+    pool: &SqlitePool,
+    ev: omacal_store::StoredEvent,
+    cal_google_id: &str,
+    client: &omacal_google::CalendarClient,
+) -> anyhow::Result<()> {
+    let fresh = client.get_event(cal_google_id, &ev.google_id).await?;
+    // A full GET contains the conference, description and location too.
+    // The RSVP-only merge left old Zoom links missing even after opening
+    // the event fetched a perfectly good conferenceData video entry point.
+    let row = row_from_wire(&fresh, ev.calendar_id, &ev.calendar_timezone)?;
+    omacal_store::upsert_event(pool, &row).await?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -3439,6 +3448,46 @@ mod tests {
             row.self_response.as_deref(), Some("declined"),
             "self_response must be re-derived from the patched attendees, not left stale"
         );
+    }
+
+    #[tokio::test]
+    async fn refreshing_an_event_recovers_replaces_and_removes_its_conference_link() {
+        let mut cached = stored(vec![]);
+        cached.start_utc = 1_789_561_800_000;
+        cached.end_utc = cached.start_utc + 40 * 60_000;
+        cached.recurrence = Some("RRULE:FREQ=WEEKLY;BYDAY=WE".into());
+        let (pool, id) = seeded_pool_with(&cached).await;
+
+        // A series imported before conferenceData support has no cached URL.
+        // Opening its popover must repair it without waiting for Google to
+        // change the event and deliver it through incremental sync again.
+        for uri in [Some("https://us06web.zoom.us/j/123456?pwd=test"),
+                    Some("https://meet.google.com/abc-defg-hij"), None] {
+            let server = wiremock::MockServer::start().await;
+            let mut body = serde_json::json!({
+                "id": "ev1", "status": "confirmed", "summary": "Morning walk",
+                "start": { "dateTime": "2026-09-16T07:30:00-05:00" },
+                "end": { "dateTime": "2026-09-16T08:10:00-05:00" },
+                "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=WE"]
+            });
+            if let Some(uri) = uri {
+                body["conferenceData"] = serde_json::json!({ "entryPoints": [
+                    { "entryPointType": "phone", "uri": "tel:+15551234567" },
+                    { "entryPointType": "video", "uri": uri }
+                ] });
+            }
+            wiremock::Mock::given(wiremock::matchers::method("GET"))
+                .and(wiremock::matchers::path("/calendars/primary/events/ev1"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(body))
+                .expect(1).mount(&server).await;
+            let client = omacal_google::CalendarClient::new(server.uri(), "test-token");
+            let (before, _, _) = omacal_store::event_by_id(&pool, id).await.unwrap().unwrap();
+            refresh_via_client(&pool, before, "primary", &client).await.unwrap();
+            let (after, _, _) = omacal_store::event_by_id(&pool, id).await.unwrap().unwrap();
+            assert_eq!(after.conference_uri.as_deref(), uri);
+            assert_eq!(after.id, id);
+            assert_eq!(after.recurrence, cached.recurrence);
+        }
     }
 
     // --- respond_via_client: reachable without touching load_config or the

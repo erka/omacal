@@ -1628,6 +1628,31 @@ mod tests {
         only_this.run(pool).await.unwrap();
     }
 
+    #[tokio::test]
+    async fn conference_backfill_resets_google_cursors_but_preserves_caldav_and_events() {
+        // Reproduce an upgrade from the pre-contacts store, where these
+        // events were imported without conferenceData support.
+        let pool = pool_migrated_below(14, 13).await;
+        let (google_cal, dav_cal) = seed_two_accounts(&pool).await;
+        sqlx::query("UPDATE accounts SET provider = 'caldav' WHERE id = 1")
+            .execute(&pool).await.unwrap();
+        for cal in [google_cal, dav_cal] {
+            sqlx::query("INSERT INTO sync_state (calendar_id, sync_token, window_start, window_end)
+                         VALUES (?1, 'old-cursor', 0, 0)")
+                .bind(cal).execute(&pool).await.unwrap();
+        }
+        let mut ev = ev(google_cal, "old-series", 0, 60_000);
+        ev.conference_uri = None;
+        let id = upsert_event(&pool, &ev).await.unwrap();
+        apply_migration(&pool, 15).await;
+
+        let remaining: Vec<i64> = sqlx::query_scalar("SELECT calendar_id FROM sync_state")
+            .fetch_all(&pool).await.unwrap();
+        assert_eq!(remaining, vec![dav_cal]);
+        assert!(event_by_id(&pool, id).await.unwrap().is_some(),
+            "cached events must remain available until the refetch succeeds");
+    }
+
     /// 0003's backfill: an event stored before it landed is missing the guest
     /// list the popover needs, and an unchanged event is never re-delivered by
     /// an incremental sync. Dropping every cursor is what makes the next sync
