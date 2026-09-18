@@ -24,11 +24,9 @@
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) const EVENT: &str = "system-tz-changed";
 
-/// Whether a `/etc/localtime` transition deserves the banner.
-///
-/// `pinned` is "this process's zone cannot follow the system": `TZ` was in
-/// the environment at launch — our own display-zone export or the user's
-/// shell, and either way the system moving is not this app's news to break.
+/// Whether a `/etc/localtime` transition deserves the banner. Only asked of
+/// a process that follows the system zone — a pinned one never watches (see
+/// [`spawn`]).
 ///
 /// Both names must be known and different. A zone that merely *becomes*
 /// readable (or stops being readable) is not evidence anything moved — a
@@ -36,10 +34,7 @@ pub(crate) const EVENT: &str = "system-tz-changed";
 /// that cries wolf once has taught the user to dismiss the one that
 /// matters.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub(crate) fn should_announce(pinned: bool, last: Option<&str>, next: Option<&str>) -> bool {
-    if pinned {
-        return false;
-    }
+pub(crate) fn should_announce(last: Option<&str>, next: Option<&str>) -> bool {
     matches!((last, next), (Some(a), Some(b)) if a != b)
 }
 
@@ -82,9 +77,16 @@ pub(crate) fn spawn(app: tauri::AppHandle) {
     use notify::{RecursiveMode, Watcher};
     use tauri::{Emitter, Manager};
 
-    // Read once, at spawn: `TZ` is process state, fixed for this process's
-    // whole life — which is the same reason the banner exists at all.
-    let pinned = std::env::var_os("TZ").is_some();
+    // `TZ` in the environment at launch — our own display-zone export or the
+    // user's shell — pins this process's zone, and it is process state, fixed
+    // for this process's whole life (the same reason the banner exists at
+    // all). A pinned process has no move to announce, whatever the system
+    // does, so it holds no watch: `/etc` is busy, and a watcher there wakes
+    // for every `passwd` and `ld.so.cache` read on the box (#134).
+    if std::env::var_os("TZ").is_some() {
+        tracing::debug!("TZ is pinned; not watching /etc for timezone changes");
+        return;
+    }
 
     std::thread::spawn(move || {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -113,7 +115,7 @@ pub(crate) fn spawn(app: tauri::AppHandle) {
             while rx.try_recv().is_ok() {}
 
             let next = read_system_zone();
-            if should_announce(pinned, last.as_deref(), next.as_deref()) {
+            if should_announce(last.as_deref(), next.as_deref()) {
                 let name = next.clone().expect("announce requires a known next zone");
                 tracing::info!(%name, "system timezone changed under a running app");
                 if let Some(state) = app.try_state::<crate::AppState>() {
@@ -135,29 +137,26 @@ pub(crate) fn spawn(app: tauri::AppHandle) {
 mod tests {
     use super::*;
 
-    /// The rule's three gates, each closed on its own: a pinned process
-    /// never banners, an unknown edge never banners, and the same zone
-    /// re-announced never banners. Only known → different → unpinned acts.
+    /// The rule's two gates, each closed on its own: an unknown edge never
+    /// banners, and the same zone re-announced never banners. Only known →
+    /// different acts. (A pinned process never gets this far: it never
+    /// watches.)
     #[test]
-    fn only_a_real_move_of_an_unpinned_zone_is_announced() {
+    fn only_a_real_move_of_the_zone_is_announced() {
         assert!(
-            should_announce(false, Some("Europe/Sofia"), Some("Asia/Kolkata")),
+            should_announce(Some("Europe/Sofia"), Some("Asia/Kolkata")),
             "the travel case is the whole feature"
         );
         assert!(
-            !should_announce(true, Some("Europe/Sofia"), Some("Asia/Kolkata")),
-            "a TZ-pinned process's zone did not move, whatever the system did"
-        );
-        assert!(
-            !should_announce(false, Some("Europe/Sofia"), Some("Europe/Sofia")),
+            !should_announce(Some("Europe/Sofia"), Some("Europe/Sofia")),
             "re-pointing to the same zone is not news"
         );
         assert!(
-            !should_announce(false, None, Some("Europe/Sofia")),
+            !should_announce(None, Some("Europe/Sofia")),
             "a zone becoming readable is not evidence it moved"
         );
         assert!(
-            !should_announce(false, Some("Europe/Sofia"), None),
+            !should_announce(Some("Europe/Sofia"), None),
             "a zone becoming unreadable is not a move either"
         );
     }
