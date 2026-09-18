@@ -5862,6 +5862,25 @@ test.describe('the tasks sidebar', () => {
     await expect(side.getByRole('button', { name: '+ Add a task' })).toHaveCount(2);
   });
 
+  test('leaving a line nobody wrote on closes it, and a written one stays', async ({ page }) => {
+    const side = await openTasks(page);
+    await side.getByRole('button', { name: 'By list' }).click();
+    await side.getByRole('button', { name: '+ Add a task' }).first().click();
+    const line = side.getByRole('textbox', { name: 'New task on Personal' });
+    await expect(line).toBeFocused();
+    // Its own controls are not leaving it.
+    await side.getByRole('button', { name: 'Date and time' }).click();
+    await expect(line).toBeVisible();
+    await side.getByRole('heading', { name: 'Tasks' }).click();
+    await expect(line).toHaveCount(0);
+
+    // Once written on, a click elsewhere keeps it, typing and all.
+    await side.getByRole('button', { name: '+ Add a task' }).first().click();
+    await line.fill('Half a thought');
+    await side.getByRole('heading', { name: 'Tasks' }).click();
+    await expect(line).toHaveValue('Half a thought');
+  });
+
   test('the line takes a date and an hour before it adds', async ({ page }) => {
     const side = await openTasks(page);
     await side.getByRole('button', { name: 'By list' }).click();

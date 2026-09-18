@@ -399,6 +399,16 @@
     lineInput?.focus();
   }
 
+  /** Leaving a line nobody wrote on closes it (Plamen, 2026-09-18: it
+   *  stayed open after the pointer moved on). A line with a title, a date or
+   *  an hour on it stays: a stray click must not cost what was typed. Moving
+   *  between the line's own controls is not leaving. */
+  function leaveLine(e: FocusEvent) {
+    const to = e.relatedTarget as Node | null;
+    if (to && (e.currentTarget as HTMLElement).contains(to)) return;
+    if (line.summary.trim() === '' && line.date === '' && line.time === '') lineList = null;
+  }
+
   const lineKeys = (e: KeyboardEvent) => {
     if (e.key === 'Enter') { e.preventDefault(); void addLine(); }
     if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); lineList = null; }
@@ -635,7 +645,7 @@
         {#if g.list}
           {@const listId = g.list.calendarId}
           {#if lineList === listId}
-            <div class="newline">
+            <div class="newline" onfocusout={leaveLine}>
               <div class="row">
                 <span class="box" aria-hidden="true"></span>
                 <span class="tick" style:background={g.color ?? 'var(--muted)'}></span>
