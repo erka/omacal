@@ -97,6 +97,43 @@ test.describe('App', () => {
     await expect.poll(alpha).toEqual({background: '95.9%', events: '79.5%'});
   });
 
+  /** #138: the whole interface's size, for a screen whose scaling does not
+   *  reach the app. Stored on release, not while the slider moves (zooming
+   *  under the hand would move the slider itself), and one press back. */
+  test('the interface scale is set on release and can go back to 100%', async ({ page }) => {
+    await page.goto(app());
+    await page.getByRole('button', {name: 'Menu'}).click();
+    await page.getByRole('button', {name: 'Settings…'}).click();
+    const modal = page.getByRole('dialog', {name: 'Settings'});
+    await modal.getByRole('tab', {name: 'Appearance'}).click();
+    const slider = modal.getByRole('slider', {name: 'Interface scale', exact: true});
+    await expect(slider).toHaveValue('100');
+    await expect(slider).toHaveAttribute('min', '75');
+    await expect(slider).toHaveAttribute('max', '200');
+    await expect(modal.getByRole('button', {name: 'Back to 100%'})).toHaveCount(0);
+    const scaleCalls = () => page.evaluate(() =>
+      (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_interface_scale').map((c: any) => c.args));
+
+    await slider.evaluate((el) => {
+      (el as HTMLInputElement).value = '140';
+      el.dispatchEvent(new Event('input', {bubbles: true}));
+    });
+    await expect(modal.locator('output[for="interface-scale"]')).toHaveText('140%');
+    expect(await scaleCalls()).toEqual([]);
+    await slider.evaluate((el) => {
+      (el as HTMLInputElement).value = '150';
+      el.dispatchEvent(new Event('input', {bubbles: true}));
+      el.dispatchEvent(new Event('change', {bubbles: true}));
+    });
+    await expect.poll(scaleCalls).toEqual([{percent: 150}]);
+    await expect(slider).toHaveValue('150');
+
+    await modal.getByRole('button', {name: 'Back to 100%'}).click();
+    await expect.poll(scaleCalls).toEqual([{percent: 150}, {percent: 100}]);
+    await expect(slider).toHaveValue('100');
+    await expect(modal.getByRole('button', {name: 'Back to 100%'})).toHaveCount(0);
+  });
+
   test('stored appearance separately fades the canvas and event fill after reload', async ({ page }) => {
     await page.goto(app());
     await page.getByRole('button', { name: 'Menu' }).click();

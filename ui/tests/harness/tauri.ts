@@ -645,6 +645,7 @@ type StubSettings = {
   fallbackReminderMinutes: number[];
   defaultCalendarId: number | null;
   defaultEventDurationMinutes: number;
+  interfaceScalePercent: number;
   backgroundTransparency: number;
   inactiveBackgroundTransparency: number;
   eventTransparency: number;
@@ -701,6 +702,7 @@ const DEFAULT_SETTINGS: StubSettings = {
   fallbackReminderMinutes: [60, 10],
   defaultCalendarId: null,
   defaultEventDurationMinutes: 60,
+  interfaceScalePercent: 100,
   // The app now owns the old 4% Omarchy baseline so the ranges are absolute:
   // The stub is Linux off Omarchy: opaque until told otherwise, with a
   // window that can be seen through. A spec telling the Omarchy story seeds
@@ -1138,6 +1140,14 @@ export function installTauriStub(scenario: string): Harness {
       case 'set_default_calendar':
         settings = saveSettings({ ...settings, defaultCalendarId: (args.id as number | null) ?? null });
         return { ...settings };
+      // `settings::set_interface_scale`'s range, and the stored value the
+      // snapshot then carries. The zoom itself is the backend's.
+      case 'set_interface_scale': {
+        const percent = args.percent as number;
+        if (percent < 75 || percent > 200) throw new Error('the interface scale must be between 75 and 200 percent');
+        settings = saveSettings({ ...settings, interfaceScalePercent: percent });
+        return settings;
+      }
       case 'set_default_event_duration':
         settings = saveSettings({ ...settings, defaultEventDurationMinutes: args.minutes as number });
         return { ...settings };

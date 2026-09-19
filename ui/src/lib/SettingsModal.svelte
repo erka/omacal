@@ -25,7 +25,7 @@
     setAppearance, APPEARANCE_OPTIONS,
     setQuitOnClose, setSecondTimezone, setSyncInterval, setTemperatureUnit, setTimeFormat,
     setMenubarLabelFormat, setMenubarDateFormat, setMenubarPreferences, setMenubarSections, setShowDate, setTrayIcon, setPhotonPlaces, setWeatherEnabled, setWeatherLocation, setWeekStart,
-    setWeekStartsToday, setWeekViewDays, setVisibleHours,
+    setWeekStartsToday, setWeekViewDays, setVisibleHours, setInterfaceScale,
     type AppSettings, type Appearance, type StartOnLogin, type WeekViewDays,
     type WindowFrame, WINDOW_FRAME_OPTIONS, setWindowFrame,
   } from './settings';
@@ -36,6 +36,15 @@
   async function changeVisibleHours(start: number, end: number) {
     try { settings = await setVisibleHours(start, end); onsettingschange?.(settings); }
     catch (e) { note = { text: String(e), kind: "error" }; }
+  }
+
+  /** The interface scale while the slider moves (#138). Applied only on
+   *  release: zooming under a dragging hand would move the slider itself. */
+  let scalePreview = $state<number | null>(null);
+  async function saveInterfaceScale(percent: number) {
+    try { settings = await setInterfaceScale(percent); onsettingschange?.(settings); }
+    catch (e) { note = { text: String(e), kind: "error" }; }
+    finally { scalePreview = null; }
   }
   let {
     accounts,
@@ -1194,6 +1203,34 @@
       <!-- The canvas can only fade where the window can be seen through, and
            macOS's cannot (AppSettings.transparentWindow); a slider that moved
            nothing would read as broken, so there is no slider there. -->
+      <section class="appearance-section" aria-labelledby="interface-scale-heading">
+        <h2 id="interface-scale-heading">Interface scale</h2>
+        <div class="range-row">
+          <label for="interface-scale">Size</label>
+          <input
+            id="interface-scale"
+            aria-label="Interface scale"
+            type="range"
+            min="75"
+            max="200"
+            step="5"
+            value={scalePreview ?? settings?.interfaceScalePercent ?? 100}
+            disabled={!settings}
+            oninput={(e) => (scalePreview = e.currentTarget.valueAsNumber)}
+            onchange={(e) => void saveInterfaceScale(e.currentTarget.valueAsNumber)}
+          />
+          <output for="interface-scale">{scalePreview ?? settings?.interfaceScalePercent ?? 100}%</output>
+        </div>
+        <p class="hint">
+          Text, controls and the calendar together, applied when you let go.
+          Useful where the screen's own scaling doesn't reach OmaCal, as when
+          it runs on Windows under WSL.
+          {#if (settings?.interfaceScalePercent ?? 100) !== 100}
+            <button type="button" class="scale-reset" onclick={() => void saveInterfaceScale(100)}>Back to 100%</button>
+          {/if}
+        </p>
+      </section>
+
       <section class="appearance-section" aria-labelledby="visible-hours-heading">
         <h2 id="visible-hours-heading">Visible hours</h2>
         <div class="visible-hours-controls">
@@ -1863,6 +1900,9 @@
                grid-template-columns: 82px minmax(120px, 1fr) 42px;
                align-items: center; gap: 10px; }
   .range-row label { font-size: 12.5px; color: var(--text); }
+  .scale-reset { appearance: none; -webkit-appearance: none; font: inherit; color: var(--accent);
+                 background: none; border: 0; padding: 0; cursor: pointer; }
+  .scale-reset:hover { text-decoration: underline; }
   .range-row input[type='range'] { width: 100%; margin: 0; accent-color: var(--accent);
                                    cursor: pointer; }
   .range-row input[type='range']:disabled { cursor: default; opacity: .5; }

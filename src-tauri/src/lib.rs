@@ -1456,6 +1456,13 @@ pub fn run() {
             // second copy of the window object is one that drifts.
             let frame = tauri::async_runtime::block_on(settings::window_frame(&pool));
             settings::apply_window_frame(app.handle(), frame);
+            // The interface scale (#138), before the first paint for the
+            // frame's reason: a window that draws at 100% and then jumps to
+            // 150% is the flash a setting should not cost.
+            let scale = tauri::async_runtime::block_on(settings::interface_scale(&pool));
+            if scale != 100 {
+                settings::apply_interface_scale(app.handle(), scale);
+            }
             pinch::install(app.handle());
 
             // **The window, as early as there is an answer.**
@@ -1743,6 +1750,7 @@ pub fn run() {
             settings::set_fallback_reminders,
             settings::set_default_calendar,
             settings::set_default_event_duration,
+            settings::set_interface_scale,
             settings::set_appearance_preferences,
             settings::set_time_format,
             settings::set_date_format,

@@ -163,6 +163,10 @@ const SAFE_EXACT: &[&str] = &[
     // src-tauri/src/settings.rs — the default event duration cannot describe
     // a zero-length event. Fixed literal, raised before the settings write.
     crate::settings::EVENT_DURATION_TOO_SHORT,
+    // src-tauri/src/settings.rs — the interface scale's range (#138). Fixed
+    // literal, raised before the settings write, no context on the way to
+    // `set_interface_scale`'s `.map_err(user_facing)`.
+    crate::settings::INTERFACE_SCALE_OUT_OF_RANGE,
     // src-tauri/src/settings.rs — both appearance percentages are bounded to
     // the range the sliders name. Fixed literal, raised before the transaction
     // begins and propagated through `set_appearance` without added context.
@@ -517,6 +521,9 @@ mod tests {
             crate::tasks::TASK_NOT_MOVED,
             crate::tasks::TASK_ON_BOTH_LISTS,
             crate::tasks::TASK_CHANGED_ON_SERVER,
+            // The interface scale's range, a fixed literal raised before the
+            // write.
+            crate::settings::INTERFACE_SCALE_OUT_OF_RANGE,
         ];
         for expected in EXPECTED {
             assert!(

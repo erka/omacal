@@ -38,6 +38,12 @@ pub const HOUR_HEIGHT_MAX: i64 = 160;
 const FALLBACK_KEY: &str = "fallback_reminder_minutes";
 const DEFAULT_CALENDAR_KEY: &str = "default_calendar_id";
 const DEFAULT_EVENT_DURATION_KEY: &str = "default_event_duration_minutes";
+const INTERFACE_SCALE_KEY: &str = "interface_scale_percent";
+/// The interface scale's range, in percent. Below three quarters the grid's
+/// hour labels stop being readable; above double, a laptop screen holds
+/// less than a day.
+pub const INTERFACE_SCALE_MIN: u32 = 75;
+pub const INTERFACE_SCALE_MAX: u32 = 200;
 const INACTIVE_BACKGROUND_TRANSPARENCY_KEY: &str = "inactive_background_transparency";
 const BACKGROUND_TRANSPARENCY_KEY: &str = "background_transparency";
 const EVENT_TRANSPARENCY_KEY: &str = "event_transparency";
@@ -518,6 +524,12 @@ pub struct AppSettings {
     /// Minutes a new timed event lasts when the user names only its start.
     /// Sixty preserves the existing behavior for installs without this row.
     pub default_event_duration_minutes: u32,
+    /// The whole interface's size, in percent (#138): the webview's own zoom,
+    /// so text, controls and the grid scale together. For a screen whose
+    /// scaling does not reach the app — WSL does not pass Windows' 150% to
+    /// Linux programs — and for anyone who wants it larger or smaller. 100
+    /// for installs without the row.
+    pub interface_scale_percent: u32,
     /// Calendar-canvas transparency in tenths of a percent, capped at 50. Zero is opaque;
     /// the default is [`appearance_baseline`]: Omarchy's former whole-window
     /// blend there, opaque anywhere else.
@@ -835,6 +847,7 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
             .and_then(|v| v.parse::<u32>().ok())
             .filter(|&minutes| minutes > 0)
             .unwrap_or(60),
+        interface_scale_percent: interface_scale(pool).await,
         // These are absolute percentages now. Before `absolute-v1`, stored
         // values meant "extra alpha after Omarchy's 4% baseline"; lazily
         // translate those rows so an old 0 opens at 4 instead of changing the
@@ -957,6 +970,9 @@ pub const INTERVAL_TOO_SHORT: &str =
 
 pub const EVENT_DURATION_TOO_SHORT: &str =
     "the default meeting duration must be at least one minute";
+
+pub const INTERFACE_SCALE_OUT_OF_RANGE: &str =
+    "the interface scale must be between 75 and 200 percent";
 
 pub const TRANSPARENCY_OUT_OF_RANGE: &str =
     "background transparency must be between 0 and 50 percent; event transparency between 0 and 25 percent";
@@ -1408,6 +1424,53 @@ async fn set_default_event_duration_impl(
         anyhow::bail!(EVENT_DURATION_TOO_SHORT);
     }
     write(pool, DEFAULT_EVENT_DURATION_KEY, &minutes.to_string()).await?;
+    Ok(read_settings(pool).await)
+}
+
+/// The stored interface scale, or 100 for none, a garbled row, or one outside
+/// the range (a row written by a build with a wider one).
+pub(crate) async fn interface_scale(pool: &SqlitePool) -> u32 {
+    read(pool, INTERFACE_SCALE_KEY)
+        .await
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|p| (INTERFACE_SCALE_MIN..=INTERFACE_SCALE_MAX).contains(p))
+        .unwrap_or(100)
+}
+
+/// Sizes the main window's content: at launch, from the stored setting, and
+/// again from [`set_interface_scale`], so a change shows at once rather than
+/// at the next start. The webview's zoom, not a CSS transform: layout, hit
+/// testing and every pointer coordinate the grid reads stay in one unit.
+pub(crate) fn apply_interface_scale(app: &tauri::AppHandle, percent: u32) {
+    use tauri::Manager;
+    if let Some(w) = app.get_webview_window("main") {
+        if let Err(e) = w.set_zoom(f64::from(percent) / 100.0) {
+            tracing::warn!(%e, percent, "could not apply the interface scale");
+        }
+    }
+}
+
+/// Stores the interface scale and applies it. Outside the range is refused
+/// rather than clamped, `set_default_event_duration`'s rule: the stored value
+/// is the one the user chose.
+#[tauri::command]
+pub async fn set_interface_scale(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    percent: u32,
+) -> Result<AppSettings, String> {
+    let settings = set_interface_scale_impl(&state.pool, percent)
+        .await
+        .map_err(|e| crate::errors::user_facing(&e))?;
+    apply_interface_scale(&app, settings.interface_scale_percent);
+    Ok(settings)
+}
+
+async fn set_interface_scale_impl(pool: &SqlitePool, percent: u32) -> anyhow::Result<AppSettings> {
+    if !(INTERFACE_SCALE_MIN..=INTERFACE_SCALE_MAX).contains(&percent) {
+        anyhow::bail!(INTERFACE_SCALE_OUT_OF_RANGE);
+    }
+    write(pool, INTERFACE_SCALE_KEY, &percent.to_string()).await?;
     Ok(read_settings(pool).await)
 }
 
@@ -2161,6 +2224,28 @@ mod tests {
 
         write(&p, DEFAULT_CALENDAR_KEY, "").await.unwrap();
         assert_eq!(read_settings(&p).await.default_calendar_id, None);
+    }
+
+    /// #138: the interface scale is stored as chosen, a value outside the
+    /// range is refused and leaves the stored one alone, and a row nobody
+    /// can use reads as 100.
+    #[tokio::test]
+    async fn the_interface_scale_round_trips_and_refuses_what_is_out_of_range() {
+        let p = pool().await;
+        assert_eq!(read_settings(&p).await.interface_scale_percent, 100, "a fresh install is at 100");
+
+        let s = set_interface_scale_impl(&p, 150).await.unwrap();
+        assert_eq!(s.interface_scale_percent, 150);
+        for refused in [0, 74, 201, 1_000] {
+            let e = set_interface_scale_impl(&p, refused).await.unwrap_err();
+            assert_eq!(e.to_string(), INTERFACE_SCALE_OUT_OF_RANGE, "{refused}");
+        }
+        assert_eq!(read_settings(&p).await.interface_scale_percent, 150, "a refusal keeps the choice");
+
+        for stored in ["", "big", "50", "400"] {
+            write(&p, INTERFACE_SCALE_KEY, stored).await.unwrap();
+            assert_eq!(read_settings(&p).await.interface_scale_percent, 100, "{stored:?}");
+        }
     }
 
     #[tokio::test]

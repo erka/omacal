@@ -118,6 +118,9 @@ export type AppSettings = {
   defaultCalendarId: number | null;
   /** Minutes used when a new timed event has a start but no explicit end. */
   defaultEventDurationMinutes: number;
+  /** The whole interface's size in percent, 75–200 (#138): the window's own
+   *  zoom, applied by the backend. */
+  interfaceScalePercent: number;
   /** Absolute calendar-canvas transparency, 0 (opaque) through 50, in 0.1% steps. */
   backgroundTransparency: number;
   inactiveBackgroundTransparency: number;
@@ -386,6 +389,10 @@ export const setSecondTimezone = (tz: string | null) =>
 
 export const setDefaultCalendar = (id: number | null) =>
   invoke<AppSettings>('set_default_calendar', { id });
+
+/** Stores the interface scale and applies it to the window at once (#138). */
+export const setInterfaceScale = (percent: number) =>
+  invoke<AppSettings>('set_interface_scale', { percent });
 
 /** Stores the free-form default length for new timed events, in minutes. */
 export const setDefaultEventDuration = (minutes: number) =>
