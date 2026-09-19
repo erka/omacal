@@ -593,7 +593,7 @@ fn logical_lines(raw: &str) -> Vec<Logical> {
 ///   every line of the block removed Apple's `DESCRIPTION:Reminder` from the
 ///   alarm. Nested components pass through whole, after the properties,
 ///   which is also the order RFC 5545 requires.
-fn patch_todo<F>(raw: &str, uid: &str, rewrite: F) -> Option<String>
+fn patch_todo<F>(raw: &str, uid: &str, ensure_alarm: bool, rewrite: F) -> Option<String>
 where
     F: Fn(&[String]) -> Vec<String>,
 {
@@ -658,6 +658,12 @@ where
                 }
             }
             out.extend(nested.iter().flat_map(|&k| lines[k].physical.iter().cloned()));
+            // Only when there is none: an alarm another client set, with its
+            // own offset, is the user's and is never doubled or replaced.
+            let has_alarm = nested.iter().any(|&k| lines[k].text.eq_ignore_ascii_case("BEGIN:VALARM"));
+            if ensure_alarm && !has_alarm {
+                out.extend(alarm_at_due_lines());
+            }
             out.extend(lines[end].physical.iter().cloned());
         } else {
             out.extend(lines[begin..=end].iter().flat_map(|l| l.physical.iter().cloned()));
@@ -786,7 +792,8 @@ impl TodoDue {
 /// carries a `DTSTART`, and a timed `DUE` needs one at the same instant or
 /// iCloud drops the time, the invalid-pair shape issue #102 first described.
 pub fn patch_todo_fields(raw: &str, uid: &str, edit: &TodoEdit, cal_tz: &str, now: Timestamp) -> Option<String> {
-    patch_todo(raw, uid, |inner| {
+    let ensure_alarm = matches!(edit.due, Some(TodoDue::At(_)));
+    patch_todo(raw, uid, ensure_alarm, |inner| {
         let sequence = inner
             .iter()
             .find(|l| l.to_ascii_uppercase().starts_with("SEQUENCE:"))
@@ -850,7 +857,7 @@ pub fn patch_todo_fields(raw: &str, uid: &str, edit: &TodoEdit, cal_tz: &str, no
 /// Completes or reopens the task with this UID, touching nothing else in the
 /// resource — [`patch_todo`]'s surgery, on the status properties alone.
 pub fn patch_todo_status(raw: &str, uid: &str, completed: bool, now: Timestamp) -> Option<String> {
-    patch_todo(raw, uid, |own| {
+    patch_todo(raw, uid, false, |own| {
         let sequence = own
             .iter()
             .find(|l| l.to_ascii_uppercase().starts_with("SEQUENCE:"))
@@ -887,6 +894,18 @@ pub fn patch_todo_status(raw: &str, uid: &str, completed: bool, now: Timestamp) 
         }
         kept
     })
+}
+
+/// The alarm a timed task carries: at the due instant, which is what a
+/// reminder made in Reminders itself carries too.
+fn alarm_at_due_lines() -> [String; 5] {
+    [
+        "BEGIN:VALARM".to_string(),
+        "ACTION:DISPLAY".to_string(),
+        "DESCRIPTION:Reminder".to_string(),
+        "TRIGGER:PT0M".to_string(),
+        "END:VALARM".to_string(),
+    ]
 }
 
 /// A brand-new single-VTODO resource.
@@ -947,11 +966,7 @@ pub fn new_todo_ics(uid: &str, summary: &str, due: Option<&IcsTime>, now: Timest
         // an omacal-created task carries nothing for the phone (or Omarchy)
         // to fire on.
         if !matches!(due, IcsTime::Date(_)) {
-            lines.push("BEGIN:VALARM".to_string());
-            lines.push("ACTION:DISPLAY".to_string());
-            lines.push("DESCRIPTION:Reminder".to_string());
-            lines.push("TRIGGER:PT0M".to_string());
-            lines.push("END:VALARM".to_string());
+            lines.extend(alarm_at_due_lines());
         }
     }
     lines.push("END:VTODO".to_string());
@@ -1833,6 +1848,60 @@ mod tests {
         assert!(out.contains("PRIORITY:5"));
         assert!(out.contains("STATUS:NEEDS-ACTION"));
         assert!(out.contains("BEGIN:VALARM") && out.contains("TRIGGER:-PT30M"));
+        assert_eq!(out.matches("BEGIN:VALARM").count(), 1, "another client's alarm is not doubled: {out}");
+    }
+
+    /// The window's quick-add creates a date-only task, and its time arrives
+    /// in a later edit — so an edit that gives a task its first time is the
+    /// path most tasks take, and it has to leave the alarm a timed task needs
+    /// (found 2026-09-18: "9/18 Test 2" carried DTSTART/DUE and no VALARM, and
+    /// the phone never fired).
+    #[test]
+    fn an_edit_that_gives_a_task_a_time_gives_it_an_alarm() {
+        let raw = "BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\nUID:t-8\r\nSUMMARY:Call\r\n\
+            DUE;VALUE=DATE:20260918\r\nSTATUS:NEEDS-ACTION\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
+        let now: Timestamp = "2026-09-18T09:00:00Z".parse().unwrap();
+        let edit = TodoEdit {
+            summary: "Call",
+            due: Some(TodoDue::At("2026-09-18T21:55:00Z".parse().unwrap())),
+            description: None,
+        };
+        let out = patch_todo_fields(raw, "t-8", &edit, "America/Denver", now).unwrap();
+        assert_eq!(out.matches("BEGIN:VALARM").count(), 1, "{out}");
+        assert!(out.contains("ACTION:DISPLAY") && out.contains("TRIGGER:PT0M"), "{out}");
+        assert!(
+            out.find("BEGIN:VALARM").unwrap() < out.find("END:VTODO").unwrap(),
+            "the alarm sits inside the VTODO: {out}"
+        );
+        assert!(
+            out.find("LAST-MODIFIED").unwrap() < out.find("BEGIN:VALARM").unwrap(),
+            "properties before nested components, as RFC 5545 wants: {out}"
+        );
+    }
+
+    /// A bare date has no time to alarm at, whatever the edit.
+    #[test]
+    fn an_edit_that_leaves_a_task_date_only_gives_it_no_alarm() {
+        let raw = "BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\nUID:t-7\r\nSUMMARY:Call\r\n\
+            DUE;VALUE=DATE:20260918\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
+        let now: Timestamp = "2026-09-18T09:00:00Z".parse().unwrap();
+        let edit = TodoEdit {
+            summary: "Call it",
+            due: Some(TodoDue::Date(Date::new(2026, 9, 19).unwrap())),
+            description: None,
+        };
+        let out = patch_todo_fields(raw, "t-7", &edit, "America/Denver", now).unwrap();
+        assert!(!out.contains("VALARM"), "{out}");
+    }
+
+    /// Completing a task must not conjure an alarm on one that never had it.
+    #[test]
+    fn completing_a_task_adds_no_alarm() {
+        let raw = "BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\nUID:t-6\r\nSUMMARY:Call\r\n\
+            DUE;TZID=America/Denver:20260918T155500\r\nEND:VTODO\r\nEND:VCALENDAR\r\n";
+        let now: Timestamp = "2026-09-18T09:00:00Z".parse().unwrap();
+        let out = patch_todo_status(raw, "t-6", true, now).unwrap();
+        assert!(!out.contains("VALARM"), "{out}");
     }
 
     /// Clearing is a real answer: no due date and no note means the
