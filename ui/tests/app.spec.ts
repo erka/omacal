@@ -5936,6 +5936,86 @@ test.describe('dropping a file on the calendar', () => {
 });
 
 /**
+ * Carrying a task from the Tasks pane onto the calendar (#115). Dropped on an
+ * hour it becomes due then; dropped on a day's TASKS row it becomes due that
+ * day. It stays a task, on its list, either way.
+ */
+test.describe('carrying a task from the pane onto the calendar', () => {
+  const DAY = 24 * 3_600_000;
+  const open = async (page: import('@playwright/test').Page) => {
+    await page.clock.setFixedTime(APP_NOW);
+    await page.goto(app());
+    await expect(page.locator('.ev').first()).toBeVisible();
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.getByRole('button', { name: 'Tasks…' }).click();
+    return page.getByRole('complementary', { name: 'Tasks' });
+  };
+  const lastUpdate = (page: import('@playwright/test').Page) => page.evaluate(() =>
+    (window as any).__harness.calls.filter((c: any) => c.cmd === 'update_task').pop()?.args);
+  /** Presses a task's title in the pane and carries it to `(x, y)`. */
+  const carry = async (page: import('@playwright/test').Page, title: string, x: number, y: number) => {
+    const from = (await page.getByRole('complementary', { name: 'Tasks' })
+      .getByRole('button', { name: title, exact: true }).boundingBox())!;
+    await page.mouse.move(from.x + 10, from.y + from.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(x, y, { steps: 12 });
+  };
+
+  test('dropped on an hour, a task becomes due then', async ({ page }) => {
+    await open(page);
+    const col = page.locator(`.col[data-start-ms="${APP_MON + DAY}"]`);
+    const box = (await col.boundingBox())!;
+    const y = box.y + box.height * (11 / 24) + 4;
+    await carry(page, 'Buy milk', box.x + box.width / 2, y);
+    // The grid draws the pin it will become, reading the time.
+    await expect(col.locator('.tpin.landing')).toContainText('11:00');
+    await expect(col.locator('.tpin.landing')).toContainText('Buy milk');
+    await page.mouse.up();
+
+    await expect.poll(() => lastUpdate(page)).toMatchObject({
+      id: 11, summary: 'Buy milk', dueMs: APP_MON + DAY + 11 * 3_600_000, dueAllDay: false,
+    });
+    await expect(page.locator('.tpin.landing')).toHaveCount(0);
+    await expect(page.locator('.carry')).toHaveCount(0);
+  });
+
+  test('dropped on a day\'s TASKS row, a task becomes due that day with no hour', async ({ page }) => {
+    await open(page);
+    const cell = page.locator(`.trow .tcell[data-start-ms="${APP_MON + 2 * DAY}"]`);
+    const box = (await cell.boundingBox())!;
+    await carry(page, 'Buy milk', box.x + box.width / 2, box.y + box.height / 2);
+    await expect(cell).toHaveClass(/drop/);
+    await expect(cell.locator('.tchip.landing')).toContainText('Buy milk');
+    await page.mouse.up();
+
+    await expect.poll(() => lastUpdate(page)).toMatchObject({
+      id: 11, dueMs: APP_MON + 2 * DAY, dueAllDay: true,
+    });
+  });
+
+  test('Escape, or a drop on nowhere, writes nothing, and a click still edits', async ({ page }) => {
+    const side = await open(page);
+    const box = (await page.locator(`.col[data-start-ms="${APP_MON + DAY}"]`).boundingBox())!;
+    await carry(page, 'Buy milk', box.x + box.width / 2, box.y + box.height * (11 / 24));
+    await expect(page.locator('.carry')).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.carry')).toHaveCount(0);
+    await page.mouse.up();
+    // Escape ended the carry, not the pane.
+    await expect(side).toBeVisible();
+
+    const pane = (await side.boundingBox())!;
+    await carry(page, 'Buy milk', pane.x + pane.width / 2, pane.y + pane.height - 20);
+    await expect(page.locator('.carry')).toHaveClass(/nowhere/);
+    await page.mouse.up();
+    expect(await lastUpdate(page)).toBeUndefined();
+
+    await side.getByRole('button', { name: 'Buy milk', exact: true }).click();
+    await expect(side.getByRole('textbox', { name: 'Task title', exact: true })).toHaveValue('Buy milk');
+  });
+});
+
+/**
  * Tasks on the week, and dragging one to another day.
  *
  * The row exists only when the visible week has something due: a strip of

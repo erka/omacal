@@ -6,6 +6,8 @@
   import DateField from './DateField.svelte';
   import TimeField from './TimeField.svelte';
   import ListPicker, { type ListChoice } from './ListPicker.svelte';
+  import { beganDrag } from './drag';
+  import { beginCarry, carried, endCarry, moveCarry, taskLanding, type TaskLanding } from './taskdrag.svelte';
   import { clockFormat } from './clock.svelte';
   import {
     createLocalTaskList, createTask, createTaskList, deleteTask, deleteTaskList, renameTaskList,
@@ -421,6 +423,74 @@
     return ms === null ? '' : dueLabel({ dueMs: ms, dueAllDay: allDay } as Task, nowMs, clockFormat(), dateFormat());
   });
 
+  /** A task picked up by its title and carried onto the calendar (#115). A
+   *  press that travels past the grid's own drag threshold is a carry; one
+   *  that does not is the click that opens the editor, as it always was. */
+  let press: { task: Task; x: number; y: number } | null = null;
+  /** Swallows the click a carry that ends back on its own title would
+   *  otherwise turn into, and nothing after it. */
+  let carriedNotClicked = false;
+
+  function pressTask(task: Task, e: PointerEvent) {
+    if (e.button !== 0 || !task.canWrite) return;
+    press = { task, x: e.clientX, y: e.clientY };
+    window.addEventListener('pointermove', carryMove);
+    window.addEventListener('pointerup', carryEnd);
+    window.addEventListener('pointercancel', carryCancel);
+    // Capture, so Escape ends the carry before anything else hears it.
+    window.addEventListener('keydown', carryKey, true);
+  }
+
+  function carryMove(e: PointerEvent) {
+    if (!press) return;
+    if (!carried()) {
+      if (!beganDrag(e.clientX - press.x, e.clientY - press.y)) return;
+      beginCarry({ id: press.task.id, summary: press.task.summary, color: listColor(press.task) }, e.clientX, e.clientY);
+      window.getSelection()?.removeAllRanges();
+      return;
+    }
+    moveCarry(e.clientX, e.clientY);
+  }
+
+  function stopCarry(commit: boolean) {
+    window.removeEventListener('pointermove', carryMove);
+    window.removeEventListener('pointerup', carryEnd);
+    window.removeEventListener('pointercancel', carryCancel);
+    window.removeEventListener('keydown', carryKey, true);
+    const task = press?.task;
+    press = null;
+    if (carried()) {
+      carriedNotClicked = true;
+      setTimeout(() => (carriedNotClicked = false), 0);
+    }
+    const at = endCarry(commit);
+    if (task && at) void dropTask(task, at);
+  }
+
+  const carryEnd = () => stopCarry(true);
+  const carryCancel = () => stopCarry(false);
+  const carryKey = (e: KeyboardEvent) => {
+    if (e.key !== 'Escape' || !carried()) return;
+    e.preventDefault();
+    e.stopPropagation();
+    stopCarry(false);
+  };
+  $effect(() => () => {
+    if (press) stopCarry(false);
+  });
+
+  /** The drop: the task is due where it landed, a date on the TASKS row and
+   *  an hour in the grid. It stays on its list, with its title and note. */
+  async function dropTask(task: Task, at: TaskLanding) {
+    note = null;
+    try {
+      setTaskRows(await updateTask(task.id, task.summary, at.dueMs, at.allDay, task.notes));
+      nowMs = Date.now();
+    } catch (e) {
+      note = String(e);
+    }
+  }
+
   function edit(task: Task) {
     if (!task.canWrite) return;
     editingId = task.id;
@@ -479,6 +549,15 @@
 {/snippet}
 
 <aside class="side" aria-label="Tasks" style="width:{width}px; flex-basis:{width}px">
+  <!-- The task in flight, under the pointer. Faded over anywhere it cannot
+       land; the grid draws where it would. -->
+  {#if carried()}
+    {@const c = carried()!}
+    <div class="carry" class:nowhere={taskLanding() === null} aria-hidden="true"
+         style:left="{c.x + 12}px" style:top="{c.y + 10}px">
+      <span class="tick" style:background={c.color ?? 'var(--muted)'}></span>{c.summary}
+    </div>
+  {/if}
   <div class="top">
     <h2>Tasks</h2>
     <div class="flex"></div>
@@ -630,7 +709,11 @@
                 onchange={() => toggle(t)}
               />
               <span class="tick" style:background={listColor(t)}></span>
-              <button class="title" onclick={() => edit(t)} disabled={!t.canWrite}>{t.summary}</button>
+              <!-- The title opens the editor, and is the grab handle for
+                   carrying the task onto the calendar. -->
+              <button class="title" disabled={!t.canWrite}
+                      onpointerdown={(e) => pressTask(t, e)}
+                      onclick={() => { if (!carriedNotClicked) edit(t); }}>{t.summary}</button>
               {#if t.dueMs !== null}
                 <span class="due" class:overdue={isOverdue(t, nowMs)}>
                   {dueLabel(t, nowMs, clockFormat(), dateFormat())}
@@ -847,6 +930,15 @@
            padding: 0; cursor: pointer; overflow: hidden; text-overflow: ellipsis;
            white-space: nowrap; }
   .title:disabled { cursor: default; }
+  /* A press on a title may become a carry, and a carry must not paint a
+     selection across the pane on its way out. */
+  .row:not(.done) .title { -webkit-user-select: none; user-select: none; }
+  .carry { position: fixed; z-index: 90; pointer-events: none; display: flex; align-items: center;
+           gap: 7px; max-width: 240px; padding: 5px 10px 5px 8px; border-radius: 6px;
+           font-size: 12px; color: var(--text); white-space: nowrap; overflow: hidden;
+           text-overflow: ellipsis; background: var(--surface); border: 1px solid var(--accent);
+           box-shadow: 0 6px 20px rgba(0, 0, 0, .35); }
+  .carry.nowhere { opacity: .55; border-color: var(--hairline); }
   .due { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums;
          white-space: nowrap; }
   .due.overdue { color: var(--error); }

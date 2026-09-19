@@ -8,6 +8,7 @@
   import WeatherGlyph from './WeatherGlyph.svelte';
   import { dateKey, type DayWeather } from './weather';
   import type { TaskChip, WeekTasks } from './taskchips';
+  import { carried, registerTaskLanding, taskLanding, type TaskLanding } from './taskdrag.svelte';
   import { layOutDay } from './daylayout';
   import { formatClock, gutterLabel, zoneAbbrev, zoneGutterLabel } from './timefmt';
   import { tick, untrack } from 'svelte';
@@ -798,8 +799,33 @@
     ];
   }
 
-  /** Whether any visible day has something for the row. It exists only then. */
-  const anyTasks = $derived(renderedDays.some((d) => rowTasksFor(d).length > 0));
+  /** Whether any visible day has something for the row. It exists only then,
+   *  and while a task is carried in from the Tasks pane: the row is where a
+   *  task lands with a date and no hour, so it has to be there to aim at. */
+  const anyTasks = $derived(renderedDays.some((d) => rowTasksFor(d).length > 0) || carried() !== null);
+
+  /** A task carried in from the Tasks pane (#115): what is under a point. An
+   *  hour column answers with its day and the quarter hour there, floored in
+   *  local wall-clock minutes for `slotAt`'s reason; the TASKS row answers
+   *  with its day and no hour. Anywhere else is nowhere to land. */
+  function landingAt(x: number, y: number): TaskLanding | null {
+    const under = document.elementFromPoint(x, y);
+    const cell = under?.closest<HTMLElement>('.tcell[data-start-ms]');
+    if (cell) {
+      const dayStartMs = Number(cell.dataset.startMs);
+      return { dayStartMs, dueMs: dayStartMs, allDay: true };
+    }
+    const col = under?.closest<HTMLElement>('.col[data-start-ms]');
+    const day = col && renderedDays.find((d) => d.start_ms === Number(col.dataset.startMs));
+    if (!col || !day) return null;
+    const r = col.getBoundingClientRect();
+    const frac = Math.min(Math.max((y - r.top) / r.height, 0), 1);
+    const at = new Date(day.start_ms + frac * (day.end_ms - day.start_ms));
+    at.setMinutes(Math.floor(at.getMinutes() / 15) * 15, 0, 0);
+    return { dayStartMs: day.start_ms, dueMs: at.getTime(), allDay: false };
+  }
+  $effect(() => registerTaskLanding(landingAt));
+  const paneLanding = $derived(carried() ? taskLanding() : null);
 
   type Pin = { chip: TaskChip; placed: Placed };
 
@@ -1876,7 +1902,9 @@
     <div class="track"><div class="tcols" class:sliding={panActive}
          style="--cols:{renderedDays.length}; --visible:{visible}" style:transform={trackTransform}>
       {#each renderedDays as d (d.start_ms)}
-        <div class="tcell" class:drop={taskDropMs === d.start_ms && taskDropMs !== taskDrag?.fromMs}>
+        <div class="tcell" data-start-ms={d.start_ms}
+             class:drop={(taskDropMs === d.start_ms && taskDropMs !== taskDrag?.fromMs)
+               || (paneLanding?.allDay === true && paneLanding.dayStartMs === d.start_ms)}>
           {#each rowTasksFor(d) as chip (chip.id)}
             {#if !inFlight(chip)}
               <div class="tchip" class:over={chip.overdue} style:--cal={chip.color ?? 'var(--muted)'}>
@@ -1900,6 +1928,12 @@
             <div class="tchip landing" class:over={taskDrag.chip.overdue}
                  style:--cal={taskDrag.chip.color ?? 'var(--muted)'}>
               <span class="tt">{taskDrag.chip.summary}</span>
+            </div>
+          {/if}
+          <!-- A task from the Tasks pane, landing on this day with no hour. -->
+          {#if paneLanding?.allDay && paneLanding.dayStartMs === d.start_ms}
+            <div class="tchip landing" style:--cal={carried()?.color ?? 'var(--muted)'}>
+              <span class="tt">{carried()?.summary}</span>
             </div>
           {/if}
         </div>
@@ -2076,6 +2110,17 @@
                   onpointerdown={(e) => startPinDrag(chip, day, e)}>{#if moving}<span class="tclock">{formatClock(pinDrag!.landedMs, clockFormat())}</span>{/if}{chip.summary}</button>
         </div>
       {/each}
+
+      <!-- A task from the Tasks pane, landing at an hour: drawn as the pin it
+           will become, reading the time it would be due, as a dragged pin's
+           card does. -->
+      {#if paneLanding && !paneLanding.allDay && paneLanding.dayStartMs === day.start_ms}
+        <div class="tchip tpin landing" style:--cal={carried()?.color ?? 'var(--muted)'}
+             style:top="calc({((paneLanding.dueMs - day.start_ms) / (day.end_ms - day.start_ms)) * 100}% + 1px)"
+             style:height="{TASK_PIN_PX - 2}px" style:left="3px" style:width="calc(100% - 6px)">
+          <span class="tt"><span class="tclock">{formatClock(paneLanding.dueMs, clockFormat())}</span>{carried()?.summary}</span>
+        </div>
+      {/if}
 
       {#if isToday}
         <div
@@ -2267,6 +2312,7 @@
           color: var(--text); }
   .tchip.over { background: color-mix(in srgb, var(--error) 12%, var(--bg)); }
   .tchip.landing { outline: 1px solid var(--accent); cursor: grabbing; }
+  .tpin.landing { z-index: 60; pointer-events: none; opacity: .9; }
   .tchip input { width: 11px; height: 11px; flex: 0 0 11px; margin: 0; }
   .tt { appearance: none; -webkit-appearance: none; font: inherit; border: 0; background: none;
         color: inherit; padding: 0; text-align: left; min-width: 0; cursor: grab;
