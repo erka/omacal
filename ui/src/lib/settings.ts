@@ -93,6 +93,9 @@ export type AppSettings = {
    *  with the database it is editing. */
   syncIntervalMs: number;
   notificationsEnabled: boolean;
+  /** Whether a task with a time announces itself when it comes due (#137).
+   *  Its own switch, apart from the events one. */
+  taskNotificationsEnabled: boolean;
   minSyncIntervalMs: number;
   /** Whether Day, Week and Month draw as a list rather than a grid (filmstrip
    *  spec §4). No settings tab shows it — the control is the `▦`/`☰` beside the
@@ -249,6 +252,10 @@ export const setSyncInterval = (ms: number) =>
 
 export const setNotificationsEnabled = (on: boolean) =>
   invoke<AppSettings>('set_notifications_enabled', { on });
+
+/** The task half of the switch above (#137). */
+export const setTaskNotificationsEnabled = (on: boolean) =>
+  invoke<AppSettings>('set_task_notifications_enabled', { on });
 
 /** Stores the tray-icon preference; the backend also applies it to the
  *  running tray immediately, so the icon reacts to the click. */

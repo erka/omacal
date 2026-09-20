@@ -271,6 +271,100 @@ pub fn due_reminders(
     out
 }
 
+
+// --- tasks -----------------------------------------------------------------
+
+/// A task the scheduler could announce (#137): open, and due at an instant
+/// rather than on a date.
+///
+/// The filtering that decides *which* tasks these are — open, timed, on a
+/// selected list — is the store query's, exactly as `calendar_selected` is for
+/// events: a task not worth drawing is not worth interrupting you.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduledTask {
+    pub task_id: i64,
+    /// The instant it is due, and half of its [`FiredTask`] key.
+    pub due_ms: i64,
+    /// Minutes before the due that the task's own alarm asks for. A task made
+    /// in Reminders with "15 minutes before" carries one; a plain one carries
+    /// none, and then the announcement is at the due itself, which is the rule
+    /// #137 asks for and what OmaCal writes on a task of its own.
+    pub lead_minutes: i64,
+    pub title: Option<String>,
+    /// The list's name, for the line under the title.
+    pub list: Option<String>,
+}
+
+/// What has already been announced for a task. Keyed by the due as well as the
+/// task, so moving a due re-arms it and moving it back does not announce twice
+/// within the same due.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FiredTask {
+    pub task_id: i64,
+    pub due_ms: i64,
+}
+
+/// One task announcement that should be posted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DueTask {
+    pub key: FiredTask,
+    /// When to announce it: the due, less the task's own lead. **May be in the
+    /// past** — the missed rule below — so a driver treats a negative delay as
+    /// "now" rather than sleeping on it.
+    pub fire_at_ms: i64,
+    pub title: Option<String>,
+    pub list: Option<String>,
+}
+
+/// How far back a missed task still speaks: a due that passed while OmaCal was
+/// shut announces itself once at the next launch, and one older than this says
+/// nothing.
+///
+/// Events bound the same rule by the occurrence's own end — a meeting stops
+/// being worth announcing when it is over. A task has no end: an overdue one
+/// stays overdue for as long as it goes undone, so without a bound the first
+/// launch after this feature shipped would announce every timed task anyone
+/// had ever left undone, all at once. A day is the window in which "you missed
+/// this" is still news.
+pub const MISSED_TASK_MS: i64 = 24 * 3_600_000;
+
+/// Which task announcements are due, out to the horizon.
+///
+/// The rules, all of them:
+/// 1. A task already announced for this due says nothing more.
+/// 2. It is announced at `due_ms - lead_minutes`, so a task carrying an alarm
+///    of its own speaks when its alarm does — the phone and the desktop agree
+///    rather than announcing the same task twice, minutes apart.
+/// 3. An announcement whose time has passed is still due (the missed rule),
+///    while one older than [`MISSED_TASK_MS`] is not.
+/// 4. Nothing beyond the horizon: the driver recomputes long before then.
+///
+/// Sorted by `fire_at_ms`, earliest first, ties broken by the key, so the
+/// driver can take the head and the result does not depend on input order.
+pub fn due_tasks(
+    tasks: &[ScheduledTask],
+    fired: &HashSet<FiredTask>,
+    now_ms: i64,
+    horizon_ms: i64,
+) -> Vec<DueTask> {
+    let mut out: Vec<DueTask> = tasks
+        .iter()
+        .filter_map(|t| {
+            let key = FiredTask { task_id: t.task_id, due_ms: t.due_ms };
+            if fired.contains(&key) {
+                return None;
+            }
+            let fire_at_ms = t.due_ms - t.lead_minutes.saturating_mul(60_000);
+            if fire_at_ms < now_ms - MISSED_TASK_MS || fire_at_ms > now_ms + horizon_ms {
+                return None;
+            }
+            Some(DueTask { key, fire_at_ms, title: t.title.clone(), list: t.list.clone() })
+        })
+        .collect();
+    out.sort_by_key(|d| (d.fire_at_ms, d.key.task_id, d.key.due_ms));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -754,5 +848,50 @@ mod tests {
         let out =
             due_reminders(&[ev], &HashSet::new(), T0900Z - 2 * HOUR, HORIZON, &[popup(60)]);
         assert!(out.is_empty());
+    }
+
+    // --- tasks (#137) ------------------------------------------------------
+
+    fn task(id: i64, due_ms: i64, lead_minutes: i64) -> ScheduledTask {
+        ScheduledTask { task_id: id, due_ms, lead_minutes, title: Some("Call the bank".into()), list: Some("Personal".into()) }
+    }
+
+    /// The four rules at once: a task already announced says nothing, one
+    /// carrying an alarm speaks when the alarm does, a missed one still speaks
+    /// while it is news, and nothing beyond the horizon.
+    #[test]
+    fn a_task_speaks_at_its_due_unless_it_carries_an_alarm_or_has_already_spoken() {
+        let now = 1_786_352_400_000;
+        let hour = 3_600_000;
+        let tasks = vec![
+            task(1, now + 2 * hour, 0),           // due in two hours
+            task(2, now + 2 * hour, 15),          // …but its alarm is 15 minutes early
+            task(3, now - 3 * hour, 0),           // missed while the app was shut
+            task(4, now - 40 * hour, 0),          // missed too long ago to be news
+            task(5, now + 60 * hour, 0),          // past the horizon
+            task(6, now + hour, 0),               // due, but already announced
+        ];
+        let fired = HashSet::from([FiredTask { task_id: 6, due_ms: now + hour }]);
+        let due = due_tasks(&tasks, &fired, now, 48 * hour);
+
+        assert_eq!(
+            due.iter().map(|d| (d.key.task_id, d.fire_at_ms)).collect::<Vec<_>>(),
+            vec![(3, now - 3 * hour), (2, now + 2 * hour - 15 * 60_000), (1, now + 2 * hour)],
+            "earliest first, and only what is due"
+        );
+        assert_eq!(due[0].title.as_deref(), Some("Call the bank"));
+        assert_eq!(due[0].list.as_deref(), Some("Personal"));
+    }
+
+    /// The same due announced again once its record is gone — a task moved to
+    /// another time and back is a new announcement, not a silent one.
+    #[test]
+    fn a_task_whose_due_moved_is_armed_again() {
+        let now = 1_786_352_400_000;
+        let fired = HashSet::from([FiredTask { task_id: 1, due_ms: now }]);
+        assert!(due_tasks(&[task(1, now, 0)], &fired, now, 48 * 3_600_000).is_empty());
+        let moved = due_tasks(&[task(1, now + 600_000, 0)], &fired, now, 48 * 3_600_000);
+        assert_eq!(moved.len(), 1, "another due is another announcement");
+        assert_eq!(moved[0].key.due_ms, now + 600_000);
     }
 }

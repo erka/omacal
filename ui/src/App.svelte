@@ -299,6 +299,16 @@
     return () => { un.then((f) => f()); };
   });
 
+  /** A clicked task announcement (#137): show the Tasks pane, which is where
+   *  the task is. Deliberately no more than that — the click means "show me",
+   *  and a task is ticked off by hand, in sight. */
+  $effect(() => {
+    const un = listen<{ id: number }>('open-task', () => {
+      tasksOpen = true;
+    });
+    return () => { un.then((f) => f()); };
+  });
+
   // A dated *fresh* launch parks its date on the backend (the webview did
   // not exist to hear an event); collect it once on mount. `take` semantics
   // backend-side, so a hot-reload remount cannot replay it.

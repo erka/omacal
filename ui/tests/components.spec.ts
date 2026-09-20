@@ -1888,6 +1888,24 @@ test.describe('Header', () => {
     await expect(again.getByLabel('Show reminders')).not.toBeChecked();
   });
 
+  /** #137: the task half of the switch, stored apart from the events one. */
+  test('Notifications turns task announcements off on their own', async ({ page }) => {
+    await page.goto(show('Header', 'connected'));
+    const modal = await openSettings(page, 'Notifications');
+    const tasks = modal.getByLabel('Announce tasks when they are due');
+    await expect(tasks, 'on until turned off').toBeChecked();
+    await expect(modal).toContainText('when its own alarm asks, for one made on a phone');
+
+    await tasks.uncheck();
+    await expect.poll(() => page.evaluate(() =>
+      (window as any).__harness.calls.filter((c: any) => c.cmd === 'set_task_notifications_enabled').pop()?.args,
+    )).toEqual({ on: false });
+    await page.keyboard.press('Escape');
+    const again = await openSettings(page, 'Notifications');
+    await expect(again.getByLabel('Announce tasks when they are due')).not.toBeChecked();
+    await expect(again.getByLabel('Show reminders')).toBeChecked();
+  });
+
   test('Notifications says when the fallback speaks, and when it never does', async ({ page }) => {
     // The tab used to promise "no policy of omacal's own"; the fallback is
     // exactly such a policy, adopted deliberately (fallback spec §1), so the

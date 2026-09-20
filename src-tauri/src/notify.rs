@@ -15,7 +15,7 @@
 //! **The only notifier the suite ever sees is [`RecordingNotifier`].** That is
 //! stated here rather than hidden, per spec §3.
 
-use omacal_core::remind::Due;
+use omacal_core::remind::{Due, DueTask};
 use crate::settings::TimeFormat;
 
 /// What a posted notification says.
@@ -80,6 +80,11 @@ pub(crate) enum Action {
     /// answer one. Carries the occurrence whole (id, start, end) for the
     /// same reason `Due` does: nothing downstream searches its way back.
     OpenEvent { event_id: i64, start_ms: i64, end_ms: i64 },
+    /// Show the app with the task this announces (#137) — a task
+    /// announcement's `default`, the click itself, and its only action. The
+    /// click means "show me", never "done": completing a task is an answer,
+    /// and an answer belongs where it can be seen and undone.
+    OpenTask { task_id: i64 },
 }
 
 /// What a clicked reminder emits, carrying the occurrence (`id`, `startMs`,
@@ -87,6 +92,11 @@ pub(crate) enum Action {
 /// chosen search hit navigates by.
 #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 pub(crate) const OPEN_EVENT_EVENT: &str = "open-event";
+
+/// What a clicked task announcement emits: the task to show (#137). The
+/// window opens its Tasks pane on it.
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+pub(crate) const OPEN_TASK_EVENT: &str = "open-task";
 
 /// The D-Bus action key a clicked notification comes back with, resolved to
 /// the [`Action`] it stood for — `None` for a dismissal (`__closed`) or a key
@@ -106,6 +116,7 @@ pub(crate) fn action_for_key(actions: &[Action], key: &str) -> Option<Action> {
                     | (Action::Snooze5m, "snooze")
                     | (Action::AcceptInvite { .. }, "default")
                     | (Action::OpenEvent { .. }, "default")
+                    | (Action::OpenTask { .. }, "default")
             )
         })
         .cloned()
@@ -195,6 +206,39 @@ pub(crate) fn notification_for_format(
         actions,
         // A reminder is about a moment; once the moment is near, an expired
         // toast has done its job. Only actionable announcements stick.
+        sticky: false,
+    }
+}
+
+/// What a task announcement says (#137).
+///
+/// The title is the task; the line under it is the hour it is due, and the
+/// list it is on where there is one — `notification_for_format`'s shape, with
+/// the list where an event's location goes. An absolute time for the same
+/// reason: an announcement may be read minutes after it arrived, and "in 5
+/// minutes" would be a lie by then.
+///
+/// One action, the click: show the task. A "Done" button is deliberately
+/// absent — Omarchy's shell invokes only `default`, so a single click would
+/// have to be either "show me" or "completed", and completing something by
+/// accident from a toast is not a mistake a notification should make possible.
+pub(crate) fn task_notification_for_format(
+    d: &DueTask,
+    tz: &str,
+    time_format: TimeFormat,
+) -> Notification {
+    let when = format!("Due {}", time_in_zone_with_format(d.key.due_ms, tz, time_format));
+    let body = match &d.list {
+        Some(list) if !list.is_empty() => format!("{when} · {list}"),
+        _ => when,
+    };
+    Notification {
+        title: d.title.clone().filter(|t| !t.is_empty()).unwrap_or_else(|| NO_TITLE.into()),
+        body,
+        actions: vec![Action::OpenTask { task_id: d.key.task_id }],
+        // A task is not a moment the way a meeting is: it waits. But a toast
+        // that stays until dismissed is a nag, and the task is still in the
+        // pane afterwards, so it behaves as a reminder does.
         sticky: false,
     }
 }
@@ -386,6 +430,7 @@ impl Notifier for DbusNotifier {
                 Action::Snooze5m => builder.action("snooze", "Snooze 5m"),
                 Action::AcceptInvite { .. } => builder.action("default", "Accept"),
                 Action::OpenEvent { .. } => builder.action("default", "Open"),
+                Action::OpenTask { .. } => builder.action("default", "Open"),
             };
         }
 

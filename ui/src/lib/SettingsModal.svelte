@@ -26,6 +26,7 @@
     setQuitOnClose, setSecondTimezone, setSyncInterval, setTemperatureUnit, setTimeFormat,
     setMenubarLabelFormat, setMenubarDateFormat, setMenubarPreferences, setMenubarSections, setShowDate, setTrayIcon, setPhotonPlaces, setWeatherEnabled, setWeatherLocation, setWeekStart,
     setWeekStartsToday, setWeekViewDays, setVisibleHours, setInterfaceScale,
+    setTaskNotificationsEnabled,
     type AppSettings, type Appearance, type StartOnLogin, type WeekViewDays,
     type WindowFrame, WINDOW_FRAME_OPTIONS, setWindowFrame,
   } from './settings';
@@ -604,6 +605,17 @@
       onsettingschange?.(settings);
     } catch (e) {
       note = { text: String(e), kind: 'error' };
+    }
+  }
+
+  /** #137's switch, `toggleNotifications`' shape and its repair. */
+  async function toggleTaskNotifications(on: boolean) {
+    note = null;
+    try {
+      settings = await setTaskNotificationsEnabled(on);
+    } catch (e) {
+      note = { text: String(e), kind: 'error' };
+      settings = settings ? { ...settings } : null;
     }
   }
 
@@ -1794,6 +1806,23 @@
         />
         Show reminders
       </label>
+      <!-- Its own switch (#137): meeting reminders and task announcements are
+           different interruptions, and somebody may want one without the
+           other. -->
+      <label class="check">
+        <input
+          type="checkbox"
+          checked={settings?.taskNotificationsEnabled ?? true}
+          disabled={!settings}
+          onchange={(e) => toggleTaskNotifications(e.currentTarget.checked)}
+        />
+        Announce tasks when they are due
+      </label>
+      <p class="hint">
+        A task with a time announces itself once, when it is due — or when its
+        own alarm asks, for one made on a phone. Tasks due on a date rather
+        than at a time say nothing.
+      </p>
       <!-- What fires is still each event's own Google reminders — with one
            addition this tab owns (fallback spec §1): when a timed event
            follows its calendar's defaults and the calendar has none, the rows

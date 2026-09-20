@@ -13,6 +13,7 @@ use crate::AppState;
 
 const SYNC_INTERVAL_KEY: &str = "sync_interval_ms";
 const NOTIFICATIONS_KEY: &str = "notifications_enabled";
+const TASK_NOTIFICATIONS_KEY: &str = "task_notifications_enabled";
 const LIST_MODE_KEY: &str = "list_mode";
 const SHOW_DATE_KEY: &str = "show_date";
 const HOUR_HEIGHT_KEY: &str = "hour_height";
@@ -460,6 +461,10 @@ impl MenubarEarlier {
 pub struct AppSettings {
     pub sync_interval_ms: i64,
     pub notifications_enabled: bool,
+    /// Whether a task with a time announces itself when it comes due (#137).
+    /// Its own switch, not the events one: somebody may want meeting
+    /// reminders and no task nagging, or the other way round.
+    pub task_notifications_enabled: bool,
     /// The floor, published rather than duplicated in the UI. The form has to
     /// say what the minimum is in order to refuse a smaller one with a reason,
     /// and a second copy of the number in TypeScript is one that drifts.
@@ -772,6 +777,13 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
         // looks exactly like the notification transport being broken — and on
         // macOS, where it may genuinely be, the two would be indistinguishable.
         notifications_enabled: read(pool, NOTIFICATIONS_KEY)
+            .await
+            .map(|v| v != "0")
+            .unwrap_or(true),
+        // On unless turned off, `notifications_enabled`'s polarity and its
+        // reasoning: a task that never speaks is indistinguishable from a
+        // broken transport.
+        task_notifications_enabled: read(pool, TASK_NOTIFICATIONS_KEY)
             .await
             .map(|v| v != "0")
             .unwrap_or(true),
@@ -1227,6 +1239,19 @@ pub async fn set_notifications_enabled(
     on: bool,
 ) -> Result<AppSettings, String> {
     write(&state.pool, NOTIFICATIONS_KEY, if on { "1" } else { "0" })
+        .await
+        .map_err(|e| crate::errors::user_facing(&e))?;
+    Ok(read_settings(&state.pool).await)
+}
+
+/// The task half of the switch above (#137), stored separately so either can
+/// be off while the other speaks.
+#[tauri::command]
+pub async fn set_task_notifications_enabled(
+    state: tauri::State<'_, AppState>,
+    on: bool,
+) -> Result<AppSettings, String> {
+    write(&state.pool, TASK_NOTIFICATIONS_KEY, if on { "1" } else { "0" })
         .await
         .map_err(|e| crate::errors::user_facing(&e))?;
     Ok(read_settings(&state.pool).await)
@@ -2070,6 +2095,7 @@ mod tests {
         let s = read_settings(&pool().await).await;
         assert_eq!(s.sync_interval_ms, crate::sync_loop::DEFAULT_INTERVAL_MS);
         assert!(s.notifications_enabled, "reminders must be on until turned off");
+        assert!(s.task_notifications_enabled, "and so must a task's own announcement (#137)");
         assert_eq!(s.min_sync_interval_ms, crate::sync_loop::MIN_INTERVAL_MS);
         assert!(!s.list_mode, "a fresh install draws the grid, not a list");
         assert!(!s.show_date, "a fresh install wears the mark, not the date");
@@ -2844,6 +2870,23 @@ mod tests {
         assert!(!read_settings(&p).await.notifications_enabled);
         write(&p, NOTIFICATIONS_KEY, "1").await.unwrap();
         assert!(read_settings(&p).await.notifications_enabled);
+    }
+
+    /// #137: the two switches are separate rows, so either can be off while
+    /// the other speaks.
+    #[tokio::test]
+    async fn task_announcements_are_switched_apart_from_event_reminders() {
+        let p = pool().await;
+        write(&p, TASK_NOTIFICATIONS_KEY, "0").await.unwrap();
+        let s = read_settings(&p).await;
+        assert!(!s.task_notifications_enabled, "tasks are quiet");
+        assert!(s.notifications_enabled, "and events still speak");
+
+        write(&p, NOTIFICATIONS_KEY, "0").await.unwrap();
+        write(&p, TASK_NOTIFICATIONS_KEY, "1").await.unwrap();
+        let s = read_settings(&p).await;
+        assert!(s.task_notifications_enabled);
+        assert!(!s.notifications_enabled);
     }
 
     /// A value nobody here wrote — hand-edited, or from a future version —

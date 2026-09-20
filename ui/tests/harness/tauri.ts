@@ -631,6 +631,7 @@ function getBigYearStub(y: number): BigYearPayload {
 type StubSettings = {
   syncIntervalMs: number;
   notificationsEnabled: boolean;
+  taskNotificationsEnabled: boolean;
   minSyncIntervalMs: number;
   listMode: boolean;
   showDate: boolean;
@@ -697,6 +698,7 @@ const STUB_TIMEZONES = ['Asia/Kolkata', 'Europe/Sofia', 'UTC'];
 const DEFAULT_SETTINGS: StubSettings = {
   syncIntervalMs: 5 * 60_000,
   notificationsEnabled: true,
+  taskNotificationsEnabled: true,
   minSyncIntervalMs: 60_000,
   // The backend's own shipped default (fallback spec §3).
   fallbackReminderMinutes: [60, 10],
@@ -1072,6 +1074,9 @@ export function installTauriStub(scenario: string): Harness {
       case 'set_quit_on_close':
         settings = saveSettings({ ...settings, quitOnClose: args.on as boolean });
         return { ...settings };
+      case 'set_task_notifications_enabled':
+        settings = saveSettings({ ...settings, taskNotificationsEnabled: args.on as boolean });
+        return settings;
       case 'set_notifications_enabled':
         settings = saveSettings({ ...settings, notificationsEnabled: args.on as boolean });
         return { ...settings };

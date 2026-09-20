@@ -1275,6 +1275,13 @@ fn dispatch_notification_action(handle: &tauri::AppHandle, action: notify::Actio
         }
         // Still display-only; re-queueing is §2.5's future.
         notify::Action::Snooze5m => {}
+        // The click on a task announcement (#137): bring the window up and
+        // hand the webview the task, which opens the Tasks pane on it.
+        notify::Action::OpenTask { task_id } => {
+            use tauri::Emitter;
+            tray::show_main_window(handle);
+            let _ = handle.emit(notify::OPEN_TASK_EVENT, serde_json::json!({ "id": task_id }));
+        }
         // The click itself: bring the window up, then hand the webview the
         // occurrence — it lands and opens the popover exactly as a chosen
         // search hit does.
@@ -1751,6 +1758,7 @@ pub fn run() {
             settings::set_default_calendar,
             settings::set_default_event_duration,
             settings::set_interface_scale,
+            settings::set_task_notifications_enabled,
             settings::set_appearance_preferences,
             settings::set_time_format,
             settings::set_date_format,

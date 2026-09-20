@@ -12,7 +12,10 @@
 //! when it would next wake — is tested at a fixed clock. Only [`spawn`] reads
 //! the real one, and it is deliberately too thin to be wrong.
 
-use omacal_core::remind::{due_reminders, Due, FiredKey, Reminder, ScheduledEvent};
+use omacal_core::remind::{
+    due_reminders, due_tasks, Due, DueTask, FiredKey, FiredTask, Reminder, ScheduledEvent,
+    ScheduledTask, MISSED_TASK_MS,
+};
 use sqlx::SqlitePool;
 
 /// How far ahead the scheduler looks (spec §4). Comfortably longer than the
@@ -29,6 +32,11 @@ pub(crate) const HORIZON_MS: i64 = 48 * 3_600_000;
 /// right now, and a window that stopped at the horizon would not see it.
 const MAX_REMINDER_LEAD_MS: i64 = 40_320 * 60_000;
 
+/// The longest lead a task's own alarm can ask for before the fetch below
+/// stops looking for it. Four weeks, as for events and for the same reason:
+/// the window bounds *dues*, while a fire time is up to a lead earlier.
+const MAX_TASK_LEAD_MS: i64 = MAX_REMINDER_LEAD_MS;
+
 /// One pass's worth of outcome, so a test can see everything the pass decided
 /// without watching a clock.
 #[derive(Debug, Default, PartialEq)]
@@ -37,11 +45,16 @@ pub(crate) struct Pass {
     /// notifier *refused* is still in here: the attempt was made and the record
     /// written, which is what stops it being attempted again forever.
     pub posted: Vec<Due>,
+    /// Task announcements posted on this pass (#137), on the same terms as
+    /// `posted` above: a refused one is still here, and still recorded.
+    pub posted_tasks: Vec<DueTask>,
     /// The earliest fire-time still ahead of `now_ms`, if any. What [`spawn`]
     /// sleeps until.
     pub next_fire_ms: Option<i64>,
     /// Rows forgotten because their occurrence has ended.
     pub pruned: u64,
+    /// Task records forgotten because nothing answers to them any more.
+    pub pruned_tasks: u64,
 }
 
 /// Maps one stored reminder into the shape the pure function takes.
@@ -120,6 +133,42 @@ async fn scheduled_events(
     Ok(out)
 }
 
+/// The scheduler's view of the tasks worth announcing at `now_ms` (#137):
+/// open, timed, on a selected list, each carrying the lead its own resource
+/// asks for.
+///
+/// Which tasks those are is the store query's decision
+/// (`tasks_to_announce`), exactly as `events_in_window` decides it for
+/// events — one query, the same `selected` gate the pane draws through, and
+/// so nothing to drift. The lead comes from the task's own `VALARM`: a
+/// reminder made on the phone with "15 minutes before" speaks when the phone
+/// speaks, and a task with no alarm speaks at its due.
+async fn scheduled_tasks(
+    pool: &SqlitePool,
+    now_ms: i64,
+    horizon_ms: i64,
+) -> anyhow::Result<Vec<ScheduledTask>> {
+    let from_ms = now_ms.saturating_sub(MISSED_TASK_MS);
+    let to_ms = now_ms.saturating_add(horizon_ms).saturating_add(MAX_TASK_LEAD_MS);
+    Ok(omacal_store::tasks_to_announce(pool, from_ms, to_ms)
+        .await?
+        .into_iter()
+        .map(|row| ScheduledTask {
+            task_id: row.task.id,
+            // `IS NOT NULL` in the query, so the default is unreachable.
+            due_ms: row.task.due_utc.unwrap_or_default(),
+            lead_minutes: row
+                .task
+                .raw_ics
+                .as_deref()
+                .and_then(|raw| omacal_caldav::todo_alarm_lead_minutes(raw, &row.task.uid))
+                .unwrap_or(0),
+            title: row.task.summary.clone(),
+            list: Some(row.calendar_summary.clone()),
+        })
+        .collect())
+}
+
 /// Whether this run is allowed to post at all.
 ///
 /// **Demo mode posts no notifications** (§2.7) — the fourth enforcement point
@@ -185,10 +234,34 @@ pub(crate) async fn run_once(
     // real pass does. A pointless loop in demo mode costs a comparison every
     // few minutes and returns here before touching the database.
     let settings = crate::settings::read_settings(pool).await;
-    if !may_notify(demo, settings.notifications_enabled) {
+    // Demo mode, and the two switches: nothing to do when neither half may
+    // speak. Each half then asks for its own switch below, so meeting
+    // reminders and task announcements are turned off apart (#137).
+    if !may_notify(demo, settings.notifications_enabled || settings.task_notifications_enabled) {
         return Ok(Pass::default());
     }
 
+    let mut pass = Pass::default();
+    if may_notify(demo, settings.notifications_enabled) {
+        run_events(pool, now_ms, horizon_ms, tz, notifier, &settings, &mut pass).await?;
+    }
+    if may_notify(demo, settings.task_notifications_enabled) {
+        run_tasks(pool, now_ms, horizon_ms, tz, notifier, &settings, &mut pass).await?;
+    }
+    Ok(pass)
+}
+
+/// The event half of a pass, split out when tasks became the second half
+/// (#137). Its rules are unchanged, and are `due_reminders`'.
+async fn run_events(
+    pool: &SqlitePool,
+    now_ms: i64,
+    horizon_ms: i64,
+    tz: &str,
+    notifier: &dyn crate::notify::Notifier,
+    settings: &crate::settings::AppSettings,
+    pass: &mut Pass,
+) -> anyhow::Result<()> {
     // Popup by construction (fallback spec §3): the setting stores minutes
     // alone, and this is the one place they become reminders.
     let fallback: Vec<Reminder> = settings
@@ -207,7 +280,6 @@ pub(crate) async fn run_once(
 
     let due = due_reminders(&events, &fired, now_ms, horizon_ms, &fallback);
 
-    let mut pass = Pass::default();
     for d in due {
         if d.fire_at_ms > now_ms {
             // Still ahead. `due_reminders` returns its results in fire-time
@@ -246,7 +318,53 @@ pub(crate) async fn run_once(
     }
 
     pass.pruned = omacal_store::prune_fired(pool, now_ms).await?;
-    Ok(pass)
+    Ok(())
+}
+
+/// The task half of a pass (#137): announce a task at its due, or at its own
+/// alarm's lead, once.
+///
+/// The same order as the event half, for the same reasons: post, then record,
+/// so a crash in between repeats one announcement rather than swallowing it;
+/// a notifier that refuses is not an error and the announcement is still
+/// recorded; and anything still ahead only moves the next wake.
+async fn run_tasks(
+    pool: &SqlitePool,
+    now_ms: i64,
+    horizon_ms: i64,
+    tz: &str,
+    notifier: &dyn crate::notify::Notifier,
+    settings: &crate::settings::AppSettings,
+    pass: &mut Pass,
+) -> anyhow::Result<()> {
+    let tasks = scheduled_tasks(pool, now_ms, horizon_ms).await?;
+    let fired: std::collections::HashSet<FiredTask> = omacal_store::fired_task_keys(pool)
+        .await?
+        .into_iter()
+        .map(|(task_id, due_ms)| FiredTask { task_id, due_ms })
+        .collect();
+
+    for d in due_tasks(&tasks, &fired, now_ms, horizon_ms) {
+        if d.fire_at_ms > now_ms {
+            pass.next_fire_ms =
+                Some(pass.next_fire_ms.map_or(d.fire_at_ms, |n: i64| n.min(d.fire_at_ms)));
+            continue;
+        }
+
+        if let Err(e) = notifier.post(&crate::notify::task_notification_for_format(
+            &d,
+            tz,
+            settings.time_format,
+        )) {
+            tracing::warn!(%e, task_id = d.key.task_id, "could not announce a task");
+        }
+
+        omacal_store::record_fired_task(pool, d.key.task_id, d.key.due_ms, now_ms).await?;
+        pass.posted_tasks.push(d);
+    }
+
+    pass.pruned_tasks = omacal_store::prune_fired_tasks(pool).await?;
+    Ok(())
 }
 
 /// How long to sleep: until the next fire-time or the next sync, whichever is
@@ -902,5 +1020,136 @@ mod tests {
             .await.unwrap();
         let (_, posted) = pass_at(&pool, T0900Z - 10 * MINUTE).await;
         assert!(posted.is_empty(), "an emptied fallback list is the feature off");
+    }
+
+    // --- tasks (#137) ------------------------------------------------------
+
+    /// A task on the seeded calendar, due at `due_ms`, with `alarm` written
+    /// into its resource verbatim (empty for none).
+    async fn seed_task(pool: &SqlitePool, id: &str, summary: &str, due_ms: i64, alarm: &str) -> i64 {
+        let ics = format!(
+            "BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\nUID:{id}\r\nSUMMARY:{summary}\r\n\
+             DUE:20260810T090000Z\r\nSTATUS:NEEDS-ACTION\r\n{alarm}END:VTODO\r\nEND:VCALENDAR\r\n"
+        );
+        omacal_store::upsert_task(
+            pool,
+            &omacal_store::StoredTask {
+                id: 0, calendar_id: 1, uid: id.into(), etag: None, caldav_href: None,
+                summary: Some(summary.into()), description: None,
+                due_utc: Some(due_ms), due_tz: Some("Europe/Sofia".into()), due_all_day: false,
+                status: "needs-action".into(), completed_utc: None, priority: 0,
+                updated_at: 0, raw_ics: Some(ics),
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    /// The whole of a task's announcement: it speaks at its due, says what it
+    /// is and when, is recorded, and never speaks for that due again.
+    #[tokio::test]
+    async fn a_task_due_now_is_announced_once_and_recorded() {
+        let pool = seeded(SOFIA, "[]").await;
+        let id = seed_task(&pool, "t-1", "Call the bank", T0900Z, "").await;
+        let fake = crate::notify::RecordingNotifier::default();
+
+        let pass = run_once(&pool, false, T0900Z, HORIZON_MS, SOFIA, &fake).await.unwrap();
+        assert_eq!(
+            pass.posted_tasks.iter().map(|d| d.key.task_id).collect::<Vec<_>>(),
+            vec![id],
+        );
+        let posted = fake.posted();
+        assert_eq!(posted.len(), 1);
+        assert_eq!(posted[0].title, "Call the bank");
+        assert_eq!(posted[0].body, "Due 12:00 · Work", "the hour it is due, and its list");
+        assert_eq!(
+            posted[0].actions,
+            vec![crate::notify::Action::OpenTask { task_id: id }],
+            "one action: show me",
+        );
+        assert_eq!(omacal_store::fired_task_keys(&pool).await.unwrap(), vec![(id, T0900Z)]);
+
+        // A second pass, even a restart, says nothing more.
+        let again = run_once(&pool, false, T0900Z + MINUTE, HORIZON_MS, SOFIA, &fake).await.unwrap();
+        assert!(again.posted_tasks.is_empty());
+        assert_eq!(fake.posted().len(), 1);
+    }
+
+    /// A task carrying an alarm of its own speaks when the alarm does, so the
+    /// desktop and the phone say the same thing at the same moment.
+    #[tokio::test]
+    async fn a_task_with_its_own_alarm_speaks_at_that_lead() {
+        let pool = seeded(SOFIA, "[]").await;
+        let alarm = "BEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:Reminder\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\n";
+        seed_task(&pool, "t-2", "Leave for the airport", T0900Z, alarm).await;
+
+        // Twenty minutes before the due: not yet, and the wake is its lead.
+        let early = run_once(&pool, false, T0900Z - 20 * MINUTE, HORIZON_MS, SOFIA, &crate::notify::RecordingNotifier::default()).await.unwrap();
+        assert!(early.posted_tasks.is_empty());
+        assert_eq!(early.next_fire_ms, Some(T0900Z - 15 * MINUTE));
+
+        let fake = crate::notify::RecordingNotifier::default();
+        let at = run_once(&pool, false, T0900Z - 15 * MINUTE, HORIZON_MS, SOFIA, &fake).await.unwrap();
+        assert_eq!(at.posted_tasks.len(), 1);
+        assert_eq!(fake.posted()[0].body, "Due 12:00 · Work", "still the due, not the alarm");
+    }
+
+    /// The missed rule, and its bound: a due that passed while OmaCal was shut
+    /// speaks once at the next launch, and one older than a day says nothing —
+    /// otherwise the first launch after this shipped would announce every
+    /// timed task anyone had left undone.
+    #[tokio::test]
+    async fn a_missed_task_speaks_once_while_it_is_still_news() {
+        let pool = seeded(SOFIA, "[]").await;
+        seed_task(&pool, "recent", "Three hours ago", T0900Z - 3 * HOUR, "").await;
+        seed_task(&pool, "stale", "Two days ago", T0900Z - 2 * DAY, "").await;
+
+        let fake = crate::notify::RecordingNotifier::default();
+        let pass = run_once(&pool, false, T0900Z, HORIZON_MS, SOFIA, &fake).await.unwrap();
+        assert_eq!(
+            pass.posted_tasks.iter().map(|d| d.title.clone().unwrap()).collect::<Vec<_>>(),
+            vec!["Three hours ago".to_string()],
+        );
+    }
+
+    /// Completing a task calls its announcement off, and its record is
+    /// forgotten with it — a task reopened later with the same due is news
+    /// again.
+    #[tokio::test]
+    async fn completing_a_task_calls_off_its_announcement() {
+        let pool = seeded(SOFIA, "[]").await;
+        let id = seed_task(&pool, "t-3", "Pay the rent", T0900Z + HOUR, "").await;
+        omacal_store::mark_task_status(&pool, id, "completed", Some(T0900Z), None, None, T0900Z)
+            .await
+            .unwrap();
+
+        let fake = crate::notify::RecordingNotifier::default();
+        let pass = run_once(&pool, false, T0900Z + HOUR, HORIZON_MS, SOFIA, &fake).await.unwrap();
+        assert!(pass.posted_tasks.is_empty(), "a done task has nothing to announce");
+        assert!(fake.posted().is_empty());
+    }
+
+    /// The two switches are apart (#137): either half can be silent while the
+    /// other speaks.
+    #[tokio::test]
+    async fn each_half_is_switched_on_its_own() {
+        let pool = seeded(SOFIA, "[]").await;
+        seed_task(&pool, "t-4", "Call the bank", T0900Z, "").await;
+        omacal_store::upsert_event(&pool, &event("ev", T0900Z + HOUR, T0900Z + 2 * HOUR, own(60)))
+            .await
+            .unwrap();
+
+        crate::settings::write(&pool, "task_notifications_enabled", "0").await.unwrap();
+        let fake = crate::notify::RecordingNotifier::default();
+        let pass = run_once(&pool, false, T0900Z, HORIZON_MS, SOFIA, &fake).await.unwrap();
+        assert!(pass.posted_tasks.is_empty(), "tasks are quiet");
+        assert_eq!(pass.posted.len(), 1, "and the meeting still speaks");
+
+        crate::settings::write(&pool, "task_notifications_enabled", "1").await.unwrap();
+        crate::settings::write(&pool, "notifications_enabled", "0").await.unwrap();
+        let fake = crate::notify::RecordingNotifier::default();
+        let pass = run_once(&pool, false, T0900Z, HORIZON_MS, SOFIA, &fake).await.unwrap();
+        assert_eq!(pass.posted_tasks.len(), 1, "and now the other way round");
+        assert!(pass.posted.is_empty());
     }
 }

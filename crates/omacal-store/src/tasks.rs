@@ -359,6 +359,87 @@ pub async fn move_task(pool: &SqlitePool, t: &StoredTask) -> anyhow::Result<()> 
     Ok(())
 }
 
+/// Every task the scheduler could announce (#137): open, due at an instant
+/// rather than on a date, on a list the user has selected, with a due in
+/// `[from_ms, to_ms]`.
+///
+/// `selected = 1` is the same gate `tasks_for_ui` applies, and for the same
+/// reason the notification loop reads events through `events_in_window`: a
+/// list not worth drawing is not worth interrupting for. Completed and
+/// cancelled tasks are left out here rather than filtered later, so completing
+/// one is all it takes to call an announcement off.
+pub async fn tasks_to_announce(
+    pool: &SqlitePool,
+    from_ms: i64,
+    to_ms: i64,
+) -> anyhow::Result<Vec<TaskRow>> {
+    let sql = format!(
+        "SELECT {COLS}, COALESCE(c.label_override, c.summary) AS cal_summary,
+                COALESCE(c.color_override, c.color_hex) AS cal_color,
+                c.access_role AS cal_role
+         FROM tasks t
+         JOIN calendars c ON c.id = t.calendar_id
+         WHERE c.selected = 1
+           AND t.status NOT IN ('completed', 'cancelled')
+           AND t.due_all_day = 0
+           AND t.due_utc IS NOT NULL
+           AND t.due_utc BETWEEN ?1 AND ?2
+         ORDER BY t.due_utc"
+    );
+    let rows = sqlx::query(&sql).bind(from_ms).bind(to_ms).fetch_all(pool).await?;
+    Ok(rows
+        .iter()
+        .map(|row| TaskRow {
+            task: row_to_task(row),
+            calendar_summary: row.get("cal_summary"),
+            color_hex: row.get("cal_color"),
+            access_role: row.get("cal_role"),
+        })
+        .collect())
+}
+
+/// Task announcements already posted, as `(task_id, due_ms)`.
+pub async fn fired_task_keys(pool: &SqlitePool) -> anyhow::Result<Vec<(i64, i64)>> {
+    Ok(sqlx::query_as("SELECT task_id, due_ms FROM fired_task_reminders").fetch_all(pool).await?)
+}
+
+/// Records one announcement. Idempotent: a pass that posts again after a crash
+/// between posting and recording writes the same row.
+pub async fn record_fired_task(
+    pool: &SqlitePool,
+    task_id: i64,
+    due_ms: i64,
+    fired_at_ms: i64,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO fired_task_reminders (task_id, due_ms, fired_at_ms)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT (task_id, due_ms) DO UPDATE SET fired_at_ms = excluded.fired_at_ms",
+    )
+    .bind(task_id)
+    .bind(due_ms)
+    .bind(fired_at_ms)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Forgets announcements nothing answers to any more: the task is gone, or its
+/// due has moved. Not a horizon (see the migration): an overdue task left
+/// undone keeps its record for as long as it keeps that due, which is what
+/// stops it announcing itself again every launch.
+pub async fn prune_fired_tasks(pool: &SqlitePool) -> anyhow::Result<u64> {
+    Ok(sqlx::query(
+        "DELETE FROM fired_task_reminders
+         WHERE NOT EXISTS (
+           SELECT 1 FROM tasks t WHERE t.id = task_id AND t.due_utc = due_ms
+         )",
+    )
+    .execute(pool)
+    .await?
+    .rows_affected())
+}
+
 /// Deletes one task row — after (never before) the server delete succeeded.
 pub async fn delete_task(pool: &SqlitePool, id: i64) -> anyhow::Result<u64> {
     Ok(sqlx::query("DELETE FROM tasks WHERE id = ?1")
@@ -581,5 +662,56 @@ mod tests {
         let rows = tasks_for_ui(&pool, 0).await.unwrap();
         assert_eq!(rows.len(), 1, "written again, not lost");
         assert_eq!((rows[0].task.calendar_id, rows[0].task.uid.as_str()), (1, "a"));
+    }
+
+    /// #137's set: open, timed, on a selected list, inside the window — and
+    /// the record that keeps one from being announced twice, forgotten when
+    /// the task is gone or its due has moved.
+    #[tokio::test]
+    async fn only_open_timed_tasks_are_announced_and_a_record_outlives_only_its_due() {
+        let (pool, _) = seeded().await;
+        let mut timed = task("timed", Some(5_000));
+        timed.summary = Some("Call the bank".into());
+        let id = upsert_task(&pool, &timed).await.unwrap();
+        let mut all_day = task("all-day", Some(5_000));
+        all_day.due_all_day = true;
+        upsert_task(&pool, &all_day).await.unwrap();
+        let mut done = task("done", Some(5_000));
+        done.status = "completed".into();
+        upsert_task(&pool, &done).await.unwrap();
+        upsert_task(&pool, &task("undated", None)).await.unwrap();
+        let mut far = task("far", Some(9_000_000));
+        far.due_all_day = false;
+        upsert_task(&pool, &far).await.unwrap();
+
+        let rows = tasks_to_announce(&pool, 0, 10_000).await.unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.task.uid.as_str()).collect::<Vec<_>>(),
+            vec!["timed"],
+            "a date, a done one, an undated one and one past the window all say nothing",
+        );
+        assert_eq!(rows[0].calendar_summary, "Chores", "the list's name rides along");
+
+        // A hidden list says nothing either.
+        sqlx::query("UPDATE calendars SET selected = 0").execute(&pool).await.unwrap();
+        assert!(tasks_to_announce(&pool, 0, 10_000).await.unwrap().is_empty());
+        sqlx::query("UPDATE calendars SET selected = 1").execute(&pool).await.unwrap();
+
+        record_fired_task(&pool, id, 5_000, 6_000).await.unwrap();
+        record_fired_task(&pool, id, 5_000, 7_000).await.unwrap();
+        assert_eq!(fired_task_keys(&pool).await.unwrap(), vec![(id, 5_000)], "recorded once");
+        assert_eq!(prune_fired_tasks(&pool).await.unwrap(), 0, "its due is still its due");
+
+        // The due moves: the old record has nothing to answer to.
+        let mut moved = timed.clone();
+        moved.due_utc = Some(8_000);
+        upsert_task(&pool, &moved).await.unwrap();
+        assert_eq!(prune_fired_tasks(&pool).await.unwrap(), 1);
+        assert!(fired_task_keys(&pool).await.unwrap().is_empty());
+
+        // And a record outlives a deleted task no longer than the next prune.
+        record_fired_task(&pool, id, 8_000, 9_000).await.unwrap();
+        delete_task(&pool, id).await.unwrap();
+        assert_eq!(prune_fired_tasks(&pool).await.unwrap(), 1);
     }
 }

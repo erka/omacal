@@ -571,6 +571,28 @@ fn logical_lines(raw: &str) -> Vec<Logical> {
     out
 }
 
+/// What an edit does to the task's own alarms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AlarmEdit {
+    /// A status change touches nothing.
+    Leave,
+    /// A timed due: the task needs an alarm, and gets one if it has none.
+    Ensure,
+    /// A due that is a date, or none at all: an alarm with a *relative*
+    /// trigger hangs on a `DTSTART` that goes with the hour, so it is dropped
+    /// rather than left pointing at nothing (#139's follow-up, found by
+    /// @joshhattan). One with an absolute trigger names its own instant and
+    /// is the user's; it stays.
+    DropRelative,
+}
+
+/// Whether a `TRIGGER` line is relative — a duration from the task's start —
+/// rather than an instant of its own.
+fn trigger_is_relative(text: &str) -> bool {
+    let upper = text.to_ascii_uppercase();
+    upper.starts_with("TRIGGER") && !upper.contains("VALUE=DATE-TIME")
+}
+
 /// Rewrites the one VTODO in `raw` whose UID matches, leaving every other
 /// component and every line this does not name exactly as it found them.
 ///
@@ -593,7 +615,7 @@ fn logical_lines(raw: &str) -> Vec<Logical> {
 ///   every line of the block removed Apple's `DESCRIPTION:Reminder` from the
 ///   alarm. Nested components pass through whole, after the properties,
 ///   which is also the order RFC 5545 requires.
-fn patch_todo<F>(raw: &str, uid: &str, ensure_alarm: bool, rewrite: F) -> Option<String>
+fn patch_todo<F>(raw: &str, uid: &str, alarms: AlarmEdit, rewrite: F) -> Option<String>
 where
     F: Fn(&[String]) -> Vec<String>,
 {
@@ -657,11 +679,35 @@ where
                     None => out.push(line),
                 }
             }
-            out.extend(nested.iter().flat_map(|&k| lines[k].physical.iter().cloned()));
+            // Nested components pass through whole, one at a time so an
+            // alarm can be weighed on its own (see [`AlarmEdit`]).
+            let mut kept_alarm = false;
+            let mut depth = 0usize;
+            let mut block: Vec<usize> = Vec::new();
+            for &k in &nested {
+                let upper = lines[k].text.to_ascii_uppercase();
+                if upper.starts_with("BEGIN:") {
+                    depth += 1;
+                }
+                block.push(k);
+                if upper.starts_with("END:") {
+                    depth -= 1;
+                }
+                if depth > 0 {
+                    continue;
+                }
+                let is_alarm = lines[block[0]].text.eq_ignore_ascii_case("BEGIN:VALARM");
+                let relative = is_alarm
+                    && block.iter().any(|&j| trigger_is_relative(&lines[j].text));
+                if !(alarms == AlarmEdit::DropRelative && relative) {
+                    kept_alarm |= is_alarm;
+                    out.extend(block.iter().flat_map(|&j| lines[j].physical.iter().cloned()));
+                }
+                block.clear();
+            }
             // Only when there is none: an alarm another client set, with its
             // own offset, is the user's and is never doubled or replaced.
-            let has_alarm = nested.iter().any(|&k| lines[k].text.eq_ignore_ascii_case("BEGIN:VALARM"));
-            if ensure_alarm && !has_alarm {
+            if alarms == AlarmEdit::Ensure && !kept_alarm {
                 out.extend(alarm_at_due_lines());
             }
             out.extend(lines[end].physical.iter().cloned());
@@ -792,8 +838,14 @@ impl TodoDue {
 /// carries a `DTSTART`, and a timed `DUE` needs one at the same instant or
 /// iCloud drops the time, the invalid-pair shape issue #102 first described.
 pub fn patch_todo_fields(raw: &str, uid: &str, edit: &TodoEdit, cal_tz: &str, now: Timestamp) -> Option<String> {
-    let ensure_alarm = matches!(edit.due, Some(TodoDue::At(_)));
-    patch_todo(raw, uid, ensure_alarm, |inner| {
+    // A timed due needs an alarm; a date or no due at all leaves nothing for
+    // a relative one to hang on.
+    let alarms = if matches!(edit.due, Some(TodoDue::At(_))) {
+        AlarmEdit::Ensure
+    } else {
+        AlarmEdit::DropRelative
+    };
+    patch_todo(raw, uid, alarms, |inner| {
         let sequence = inner
             .iter()
             .find(|l| l.to_ascii_uppercase().starts_with("SEQUENCE:"))
@@ -857,7 +909,7 @@ pub fn patch_todo_fields(raw: &str, uid: &str, edit: &TodoEdit, cal_tz: &str, no
 /// Completes or reopens the task with this UID, touching nothing else in the
 /// resource — [`patch_todo`]'s surgery, on the status properties alone.
 pub fn patch_todo_status(raw: &str, uid: &str, completed: bool, now: Timestamp) -> Option<String> {
-    patch_todo(raw, uid, false, |own| {
+    patch_todo(raw, uid, AlarmEdit::Leave, |own| {
         let sequence = own
             .iter()
             .find(|l| l.to_ascii_uppercase().starts_with("SEQUENCE:"))
@@ -906,6 +958,44 @@ fn alarm_at_due_lines() -> [String; 5] {
         "TRIGGER:PT0M".to_string(),
         "END:VALARM".to_string(),
     ]
+}
+
+/// How long before its due a task's own alarm asks to speak, in minutes
+/// (#137), or `None` for a task that carries none.
+///
+/// A reminder made on the phone with "15 minutes before" carries `-PT15M`; one
+/// OmaCal writes carries `PT0M`, which is zero minutes before — the due
+/// itself. Honouring the task's own alarm is what keeps the desktop and the
+/// phone saying the same thing at the same moment rather than twice, minutes
+/// apart.
+///
+/// Ignored: an absolute `TRIGGER` (`VALUE=DATE-TIME`), which names an instant
+/// rather than a lead, and one hung on the task's end (`RELATED=END`), which
+/// has nothing to hang on — a VTODO OmaCal writes has no `DURATION`. Both fall
+/// back to the due itself. Where a task carries several alarms the earliest
+/// wins: it is the one that speaks first.
+pub fn todo_alarm_lead_minutes(raw: &str, uid: &str) -> Option<i64> {
+    let cal = parse(raw)?;
+    let todo = cal
+        .components("VTODO")
+        .find(|t| t.prop_value("UID").map(str::trim) == Some(uid))?;
+    todo.components("VALARM")
+        .filter_map(|alarm| {
+            let trigger = alarm.prop("TRIGGER")?;
+            let param = |name: &str, want: &str| {
+                trigger
+                    .params
+                    .iter()
+                    .any(|(k, v)| k.eq_ignore_ascii_case(name) && v.eq_ignore_ascii_case(want))
+            };
+            if param("VALUE", "DATE-TIME") || param("RELATED", "END") {
+                return None;
+            }
+            // `-PT15M` is a quarter of an hour *before*, so the lead is the
+            // negated offset.
+            Some(-parse_duration_ms(&trigger.value)? / 60_000)
+        })
+        .max()
 }
 
 /// A brand-new single-VTODO resource.
@@ -2227,7 +2317,15 @@ END:VEVENT\r\nEND:VCALENDAR";
     #[test]
     fn editing_a_folded_task_keeps_its_uid_its_alarm_and_the_rfc_order() {
         let now = Timestamp::from_millisecond(1_790_000_000_000).unwrap();
-        let edit = TodoEdit { summary: "Pay the rent", due: None, description: Some("to the landlord") };
+        // A timed due, so the task keeps the alarm this test then reads: an
+        // edit that takes the time away takes a relative alarm with it, which
+        // is `clearing_a_tasks_time_takes_the_alarm_that_hung_on_it`'s subject
+        // rather than this one's (folding).
+        let edit = TodoEdit {
+            summary: "Pay the rent",
+            due: Some(TodoDue::At("2026-09-19T12:00:00Z".parse().unwrap())),
+            description: Some("to the landlord"),
+        };
         let out = patch_todo_fields(FOLDED, "abc", &edit, "Europe/Sofia", now).unwrap();
         let (todo, vtodo) = read_back(&out);
         assert_eq!(todo.uid, "abc", "no continuation line joined the UID");
@@ -2576,5 +2674,87 @@ END:VEVENT\r\nEND:VCALENDAR";
         let (rid_ms, _, _) =
             resolve(cloned.recurrence_id.as_ref().unwrap(), "UTC").unwrap();
         assert_eq!(ms, rid_ms, "the clone's DTSTART is the occurrence it overrides");
+    }
+
+    /// #137: the desktop speaks when the task's own alarm does. A reminder
+    /// made on the phone carries its lead; one OmaCal wrote carries `PT0M`,
+    /// the due itself; and a trigger this cannot honour reads as none.
+    #[test]
+    fn a_tasks_own_alarm_says_how_long_before_its_due_it_speaks() {
+        let with = |alarm: &str| {
+            format!(
+                "BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\nUID:t-1\r\nSUMMARY:Call\r\n\
+                 DUE;TZID=Europe/Sofia:20260918T155500\r\n{alarm}END:VTODO\r\nEND:VCALENDAR\r\n"
+            )
+        };
+        let alarm = |trigger: &str| {
+            format!("BEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:Reminder\r\nTRIGGER{trigger}\r\nEND:VALARM\r\n")
+        };
+
+        assert_eq!(todo_alarm_lead_minutes(&with(""), "t-1"), None, "no alarm, no lead");
+        assert_eq!(todo_alarm_lead_minutes(&with(&alarm(":PT0M")), "t-1"), Some(0), "OmaCal's own");
+        assert_eq!(todo_alarm_lead_minutes(&with(&alarm(":-PT15M")), "t-1"), Some(15), "Reminders'");
+        assert_eq!(todo_alarm_lead_minutes(&with(&alarm(":-P1D")), "t-1"), Some(24 * 60));
+        assert_eq!(todo_alarm_lead_minutes(&with(&alarm(":PT30M")), "t-1"), Some(-30), "after the due");
+        assert_eq!(
+            todo_alarm_lead_minutes(&with(&alarm(";VALUE=DATE-TIME:20260918T150000Z")), "t-1"),
+            None,
+            "an instant is not a lead",
+        );
+        assert_eq!(
+            todo_alarm_lead_minutes(&with(&alarm(";RELATED=END:-PT15M")), "t-1"),
+            None,
+            "a VTODO OmaCal writes has no end to hang on",
+        );
+        // Several: the earliest speaks.
+        let two = with(&format!("{}{}", alarm(":-PT5M"), alarm(":-PT45M")));
+        assert_eq!(todo_alarm_lead_minutes(&two, "t-1"), Some(45));
+        // Another task's alarm is not this one's.
+        assert_eq!(todo_alarm_lead_minutes(&with(&alarm(":-PT15M")), "t-2"), None);
+    }
+
+    /// #139's follow-up: taking a task's time away leaves its at-due alarm
+    /// pointing at a `DTSTART` that went with the hour, and the phone fired at
+    /// whatever the server made of it. A relative alarm goes with the time; an
+    /// absolute one names its own instant and stays.
+    #[test]
+    fn clearing_a_tasks_time_takes_the_alarm_that_hung_on_it() {
+        let timed = |alarm: &str| {
+            format!(
+                "BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\nUID:t-9\r\nSUMMARY:Call\r\n\
+                 DTSTART;TZID=Europe/Sofia:20260918T155500\r\n\
+                 DUE;TZID=Europe/Sofia:20260918T155500\r\n{alarm}END:VTODO\r\nEND:VCALENDAR\r\n"
+            )
+        };
+        let relative = "BEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:Reminder\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\n";
+        let absolute = "BEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:Reminder\r\nTRIGGER;VALUE=DATE-TIME:20260918T120000Z\r\nEND:VALARM\r\n";
+        let now: Timestamp = "2026-09-18T09:00:00Z".parse().unwrap();
+        let to_date = TodoEdit {
+            summary: "Call",
+            due: Some(TodoDue::Date(Date::new(2026, 9, 19).unwrap())),
+            description: None,
+        };
+
+        let out = patch_todo_fields(&timed(relative), "t-9", &to_date, "Europe/Sofia", now).unwrap();
+        assert!(!out.contains("VALARM"), "nothing left for it to hang on: {out}");
+        assert!(out.contains("DUE;VALUE=DATE:20260919"), "{out}");
+
+        let out = patch_todo_fields(&timed(absolute), "t-9", &to_date, "Europe/Sofia", now).unwrap();
+        assert!(out.contains("TRIGGER;VALUE=DATE-TIME:20260918T120000Z"), "the user's own: {out}");
+
+        // Clearing the due entirely does the same.
+        let cleared = TodoEdit { summary: "Call", due: None, description: None };
+        let out = patch_todo_fields(&timed(relative), "t-9", &cleared, "Europe/Sofia", now).unwrap();
+        assert!(!out.contains("VALARM"), "{out}");
+
+        // And a task that keeps its time keeps its alarm, exactly one.
+        let keep = TodoEdit {
+            summary: "Call",
+            due: Some(TodoDue::At("2026-09-18T12:55:00Z".parse().unwrap())),
+            description: None,
+        };
+        let out = patch_todo_fields(&timed(relative), "t-9", &keep, "Europe/Sofia", now).unwrap();
+        assert_eq!(out.matches("BEGIN:VALARM").count(), 1);
+        assert!(out.contains("TRIGGER:-PT15M"), "the user's lead, not ours: {out}");
     }
 }

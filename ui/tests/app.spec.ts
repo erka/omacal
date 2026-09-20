@@ -97,6 +97,15 @@ test.describe('App', () => {
     await expect.poll(alpha).toEqual({background: '95.9%', events: '79.5%'});
   });
 
+  /** #137: a clicked task announcement opens the Tasks pane, which is where
+   *  the task is. The click means "show me", never "done". */
+  test('a clicked task announcement opens the Tasks pane', async ({ page }) => {
+    await page.goto(app());
+    await expect(page.getByRole('complementary', { name: 'Tasks' })).toHaveCount(0);
+    await page.evaluate(() => (window as any).__harness.emit('open-task', { id: 11 }));
+    await expect(page.getByRole('complementary', { name: 'Tasks' })).toBeVisible();
+  });
+
   /** #138: the whole interface's size, for a screen whose scaling does not
    *  reach the app. Stored on release, not while the slider moves (zooming
    *  under the hand would move the slider itself), and one press back. */
