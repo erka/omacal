@@ -18,6 +18,7 @@
   import DateField from './DateField.svelte';
   import SaveConfirm from './SaveConfirm.svelte';
   import { editReach, type SendUpdates } from './eventdetail';
+  import { zoneName } from './zonename.svelte';
   import {
     CUSTOM_REPEAT, REPEAT_OPTIONS, WEEKDAY_OPTIONS, addGuest, endAfterStart, isAddress,
     isCalendarAddress, mailableGuests, normalizedWeeklyDays, previewSpan, removableGuest,
@@ -536,7 +537,7 @@
       invalidField = 'repeatEnd';
       return;
     }
-    const result = { calendarId: value.calendarId, scope, fields: toEventInput(value, initial) };
+    const result = { calendarId: value.calendarId, scope, fields: toEventInput(value, initial, zoneName()) };
 
     // **Spec §3: whether to mail the guests is a choice, not a consequence.**
     //

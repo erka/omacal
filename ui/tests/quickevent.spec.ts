@@ -5,6 +5,11 @@ import {
 } from '../src/lib/quickevent';
 import { toEventInput } from '../src/lib/eventform';
 
+/** The zone `toEventInput` stamps on its payload. The runner's own, so these
+ *  cases read exactly as they did when it took the zone from `Intl` itself;
+ *  the spelling it carries is `timezone-label.spec.ts`'s business (#140). */
+const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
 const at = (y: number, m: number, d: number, h = 0, minute = 0) =>
   new Date(y, m - 1, d, h, minute).getTime();
 
@@ -166,7 +171,7 @@ test.describe('quick event natural language', () => {
       { email: 'ANA@example.com', optional: false },
       { email: 'bob@example.com', optional: true },
     ]);
-    const wire = toEventInput(parsed.value, parsed.baseline);
+    const wire = toEventInput(parsed.value, parsed.baseline, TZ);
     expect(wire.guests).toEqual(parsed.value.guests);
   });
 
@@ -187,8 +192,8 @@ test.describe('quick event natural language', () => {
     expect(parsed.value.date).toBe('2026-08-25');
     expect(parsed.value.title).toBe('Meet with Tim');
     expect(parsed.value.videoCall).toBeNull();
-    expect(toEventInput(parsed.value, parsed.baseline).repeat).toBe('weekly');
-    expect(toEventInput(parsed.value, parsed.baseline).weeklyDays).toEqual(['TU']);
+    expect(toEventInput(parsed.value, parsed.baseline, TZ).repeat).toBe('weekly');
+    expect(toEventInput(parsed.value, parsed.baseline, TZ).weeklyDays).toEqual(['TU']);
   });
 
   test('turns the SMTWRFS shorthand into a custom weekly cadence', () => {
@@ -200,7 +205,7 @@ test.describe('quick event natural language', () => {
     // Tuesday is not in MWF, so DTSTART advances to the next real occurrence.
     expect(parsed.value.date).toBe('2026-08-26');
     expect(parsed.value.start).toBe('09:00');
-    expect(toEventInput(parsed.value, parsed.baseline)).toMatchObject({
+    expect(toEventInput(parsed.value, parsed.baseline, TZ)).toMatchObject({
       repeat: 'weekly', weeklyDays: ['MO', 'WE', 'FR'],
     });
   });
@@ -246,7 +251,7 @@ test.describe('quick event natural language', () => {
       expect(parsed.value.repeatEnd, words.join(' | ')).toEqual({
         kind: 'on', date: '2026-09-30',
       });
-      expect(toEventInput(parsed.value, parsed.baseline).repeatEnd).toEqual({
+      expect(toEventInput(parsed.value, parsed.baseline, TZ).repeatEnd).toEqual({
         kind: 'on', date: '2026-09-30',
       });
     }
@@ -281,14 +286,14 @@ test.describe('quick event natural language', () => {
   test('understands video commands and real meeting URLs', () => {
     const meet = parseQuickEvent('30m 2p Meet Tim +meet', context());
     expect(meet.value.videoCall).toEqual({ provider: 'googleMeet', uri: null, source: 'new' });
-    expect(toEventInput(meet.value, meet.baseline).conference).toBe('googleMeet');
+    expect(toEventInput(meet.value, meet.baseline, TZ).conference).toBe('googleMeet');
 
     const zoom = parseQuickEvent(
       '30m 2p Meet Tim https://us02web.zoom.us/j/123456?pwd=x', context(),
     );
     expect(zoom.errors).toEqual([]);
     expect(zoom.value.videoCall?.provider).toBe('zoom');
-    expect(toEventInput(zoom.value, zoom.baseline).location)
+    expect(toEventInput(zoom.value, zoom.baseline, TZ).location)
       .toBe('Zoom: https://us02web.zoom.us/j/123456?pwd=x');
 
     const needsLink = parseQuickEvent('30m 2p Meet Tim +zoom', context());

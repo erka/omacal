@@ -1,6 +1,7 @@
 <!-- ui/src/lib/Header.svelte -->
 <script lang="ts">
   import { reauthMessage, syncLight, tzChangeMessage, type AppStatus } from './status';
+  import { zoneName } from './zonename.svelte';
   import type { Calendar } from './calendars';
   import { escapeCloses } from './dismiss.svelte';
   import { listable } from './filmstrip';
@@ -14,7 +15,7 @@
     status, anchorMs, weekStartMs, weekStartsToday = false, weekDays = 7,
     yearShown = new Date(anchorMs).getFullYear(),
     signingIn = false, onCancelSignIn = () => {},
-    busy, error, calendars, view, onpick, displayTimezone = null,
+    busy, error, calendars, view, onpick,
     onsettingschange, onappearancechange,
     listMode, onToggleList,
     onPrev, onNext, onToday, onQuickAdd, onSearch, onSignIn, onSync, oncalendarchange, ontasks,
@@ -46,8 +47,6 @@
     onCancelSignIn?: () => void;
     error: string | null;
     calendars: Calendar[];
-    /** The saved display-zone name, or null to follow the runtime's zone. */
-    displayTimezone?: string | null;
     /** The view the switcher shows as current — `App`'s own `view` state,
      *  passed straight through. */
     view: View;
@@ -187,11 +186,14 @@
     return () => clearInterval(id);
   });
 
-  // The browser already runs in the selected display zone, but Intl may
-  // report an older alias (Europe/Kiev for Europe/Kyiv). Preserve the saved
-  // spelling so the header agrees with Settings; use Intl for System default.
-  // The offset still follows the browser's clock and `now`, including DST.
-  const zone = $derived(displayTimezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone);
+  // The zone every time on screen is drawn in. Named in the header because
+  // nothing else says it: 15:00 reads identically in Sofia and in Delhi, and
+  // which one the grid means was otherwise something the user had to
+  // remember. The name comes from the backend rather than from `Intl` — see
+  // `zonename.svelte.ts`, and #140 for the alias that made it necessary.
+  // The offset rides in the hover off `now`, so a DST change while the app
+  // is open is not shown stale.
+  const zone = $derived(zoneName());
   const zoneOffset = $derived(
     new Intl.DateTimeFormat(undefined, { timeZoneName: 'shortOffset' })
       .formatToParts(new Date(now))

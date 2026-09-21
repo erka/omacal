@@ -1342,11 +1342,20 @@ export const endAfterStart = (value: EventFormValue): boolean => {
  * and does not happen here. It is `instantOf`, under `whenOf`, so that the Save
  * guard and the wire cannot disagree about what a form contains.
  *
+ * **`zone` is the caller's to supply, and deliberately has no default.** It
+ * is written to the server as the event's `TZID`, and the obvious default —
+ * `Intl`'s idea of the local zone — is the bug it exists to avoid: the
+ * webview resolves `Europe/Kyiv` to `Europe/Kiev`, so events were stamped
+ * with a name the user never picked (#140). A default here would let the
+ * next call site reintroduce that silently; components pass `zoneName()`.
+ *
  * Empty strings become `null`, not `""`: `changed_fields` sends a `null` to
  * clear a field, and an empty summary sent as `""` would leave a Google event
  * titled with an empty string rather than untitled.
  */
-export function toEventInput(value: EventFormValue, initial: EventFormValue): EventInput {
+export function toEventInput(
+  value: EventFormValue, initial: EventFormValue, zone: string,
+): EventInput {
   const blank = (s: string) => (s.trim() === '' ? null : s);
   const repeatChanged = value.repeat !== initial.repeat
     || (value.repeat === 'weekly' && !sameWeeklyDays(value.weeklyDays, initial.weeklyDays))
@@ -1381,7 +1390,7 @@ export function toEventInput(value: EventFormValue, initial: EventFormValue): Ev
     location: blank(location),
     description: blank(value.description),
     when: whenOf(value),
-    tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    tz: zone,
     // A create has no rule to leave untouched. This matters for quick-add and
     // paste-style seeds whose repeat value is already populated when the full
     // editor opens: comparing only with `initial` would omit that real choice.

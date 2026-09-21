@@ -11,6 +11,11 @@ import {
   isCalendarAddress, renamedGuest,
 } from '../src/lib/eventform';
 
+/** The zone `toEventInput` stamps on its payload. The runner's own, so these
+ *  cases read exactly as they did when it took the zone from `Intl` itself;
+ *  the spelling it carries is `timezone-label.spec.ts`'s business (#140). */
+const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
 /** How long a **timed** value is, in ms.
  *
  *  `whenOf` returns a union and a timed value is the only kind with instants
@@ -97,18 +102,18 @@ test.describe('custom weekly patterns', () => {
     const value: EventFormValue = {
       ...initial, repeat: 'weekly', weeklyDays: ['FR', 'MO', 'WE'],
     };
-    const sent = toEventInput(value, initial);
+    const sent = toEventInput(value, initial, TZ);
     expect(sent.repeat).toBe('weekly');
     expect(sent.weeklyDays).toEqual(['MO', 'WE', 'FR']);
   });
 
   test('an unchanged edit sends no recurrence, while a day change sends the whole pattern', () => {
     const initial = { ...wednesday(), isEdit: true, isRecurring: true, repeat: 'weekly' };
-    expect(toEventInput(initial, initial).repeat).toBeUndefined();
-    expect(toEventInput(initial, initial).weeklyDays).toBeUndefined();
+    expect(toEventInput(initial, initial, TZ).repeat).toBeUndefined();
+    expect(toEventInput(initial, initial, TZ).weeklyDays).toBeUndefined();
 
     const changed: EventFormValue = { ...initial, weeklyDays: ['MO', 'WE', 'FR'] };
-    const sent = toEventInput(changed, initial);
+    const sent = toEventInput(changed, initial, TZ);
     expect(sent.repeat).toBe('weekly');
     expect(sent.weeklyDays).toEqual(['MO', 'WE', 'FR']);
   });
@@ -136,7 +141,7 @@ test.describe('repeat endings', () => {
   test('creates COUNT and UNTIL inputs and treats ending-only edits as recurrence changes', () => {
     const initial = recurring();
     const counted: EventFormValue = { ...initial, repeatEnd: { kind: 'after', count: 12 } };
-    expect(toEventInput(counted, initial)).toMatchObject({
+    expect(toEventInput(counted, initial, TZ)).toMatchObject({
       repeat: 'weekly', weeklyDays: ['WE'], repeatEnd: { kind: 'after', count: 12 },
     });
 
@@ -144,17 +149,17 @@ test.describe('repeat endings', () => {
       ...initial, isEdit: true, isRecurring: true,
       repeatEnd: { kind: 'on', date: '2026-10-31' },
     };
-    expect(toEventInput(editing, editing).repeat).toBeUndefined();
+    expect(toEventInput(editing, editing, TZ).repeat).toBeUndefined();
     const unbounded: EventFormValue = { ...editing, repeatEnd: { kind: 'never' } };
-    expect(toEventInput(unbounded, editing)).toMatchObject({ repeat: 'weekly' });
-    expect(toEventInput(unbounded, editing).repeatEnd).toBeUndefined();
+    expect(toEventInput(unbounded, editing, TZ)).toMatchObject({ repeat: 'weekly' });
+    expect(toEventInput(unbounded, editing, TZ).repeatEnd).toBeUndefined();
 
     // The hidden old boundary must not travel beside `repeat: never` when a
     // bounded series is turned off. That pair is contradictory and the
     // backend deliberately refuses it.
     const stopped: EventFormValue = { ...editing, repeat: 'never' };
-    expect(toEventInput(stopped, editing).repeat).toBe('never');
-    expect(toEventInput(stopped, editing).repeatEnd).toBeUndefined();
+    expect(toEventInput(stopped, editing, TZ).repeat).toBe('never');
+    expect(toEventInput(stopped, editing, TZ).repeatEnd).toBeUndefined();
   });
 
   test('validates count/date endings and compares tagged values exactly', () => {
@@ -711,7 +716,7 @@ test.describe('a timed value is sent as the instants it was read off', () => {
       // block's** times, never `detail.start_ms`.
       const initial = ef.valueFromDetail(d, s, e);
       const value = { ...initial, title: 'Renamed' };
-      const sent = ef.toEventInput(value, initial);
+      const sent = ef.toEventInput(value, initial, Intl.DateTimeFormat().resolvedOptions().timeZone);
       return {
         when: sent.when, date: value.date, start: value.start, end: value.end,
         // The premise again: the browser reads the second pass as the same wall
@@ -766,7 +771,7 @@ test.describe('a timed value is sent as the instants it was read off', () => {
       // The user moves the start earlier and leaves the end alone.
       const value = { ...initial, start: '02:00' };
       return {
-        when: ef.toEventInput(value, initial).when,
+        when: ef.toEventInput(value, initial, Intl.DateTimeFormat().resolvedOptions().timeZone).when,
         // This spec's own premise, which it used to borrow from its siblings:
         // run verbatim in a zone with no transition on this date — Istanbul is
         // UTC+3 all year — every assertion below passes while proving nothing,
@@ -804,7 +809,7 @@ test.describe('a timed value is sent as the instants it was read off', () => {
       const ef = (window as any).__eventform;
       const initial = ef.valueFromDetail(d, d.start_ms, d.end_ms);
       const value = { ...initial, end: '03:15' };
-      const when = ef.toEventInput(value, initial).when;
+      const when = ef.toEventInput(value, initial, Intl.DateTimeFormat().resolvedOptions().timeZone).when;
       return {
         when, saveable: ef.endAfterStart(value),
         // What an all-or-nothing check would have sent for the start instead.
@@ -1247,7 +1252,7 @@ test.describe('an all-day event’s dates cross the boundary as dates', () => {
       // Exactly what `App.openEdit` then `App.saveForm` do, with the user
       // touching nothing at all.
       const value = ef.valueFromDetail(d, d.start_ms, d.end_ms);
-      const sent = ef.toEventInput(value, value);
+      const sent = ef.toEventInput(value, value, Intl.DateTimeFormat().resolvedOptions().timeZone);
       return {
         shownFirstDay: value.date, shownLastDay: value.endDate, when: sent.when,
         // The browser's own reading of the stored instant — what the old code
@@ -1297,7 +1302,7 @@ test.describe('an all-day event’s dates cross the boundary as dates', () => {
     const r = await page.evaluate((d) => {
       const ef = (window as any).__eventform;
       const value = ef.valueFromDetail(d, d.start_ms, d.end_ms);
-      const sent = ef.toEventInput(value, value);
+      const sent = ef.toEventInput(value, value, Intl.DateTimeFormat().resolvedOptions().timeZone);
       return {
         value, when: sent.when,
         browserStart: ef.dateOf(d.start_ms), browserEnd: ef.dateOf(d.end_ms),
@@ -1361,7 +1366,7 @@ test.describe('an all-day event’s dates cross the boundary as dates', () => {
       const ef = (window as any).__eventform;
       const sent = (d: any) => {
         const value = ef.valueFromDetail(d, d.start_ms, d.end_ms);
-        return { shownLastDay: value.endDate, when: ef.toEventInput(value, value).when };
+        return { shownLastDay: value.endDate, when: ef.toEventInput(value, value, Intl.DateTimeFormat().resolvedOptions().timeZone).when };
       };
       return { one: sent(one), three: sent(three) };
     }, [oneDay, trip]);
@@ -1419,7 +1424,7 @@ test.describe('an all-day event’s dates cross the boundary as dates', () => {
       const ef = (window as any).__eventform;
       const value = ef.valueFromDetail(d, s, e);
       return {
-        value, when: ef.toEventInput(value, value).when,
+        value, when: ef.toEventInput(value, value, Intl.DateTimeFormat().resolvedOptions().timeZone).when,
         browserReading: ef.dateOf(s),
       };
     }, [master, occurrenceStart, occurrenceEnd] as [typeof master, number, number]);
@@ -1500,7 +1505,7 @@ test.describe('an all-day event’s last day is read, not derived either', () =>
     const r = await page.evaluate((d) => {
       const ef = (window as any).__eventform;
       const value = ef.valueFromDetail(d, d.start_ms, d.end_ms);
-      return { value, when: ef.toEventInput(value, value).when };
+      return { value, when: ef.toEventInput(value, value, Intl.DateTimeFormat().resolvedOptions().timeZone).when };
     }, detail);
 
     // The last day a person would point at, unmoved.
@@ -1567,7 +1572,7 @@ test.describe('an all-day occurrence’s shift is counted in whole days', () => 
       const ef = (window as any).__eventform;
       const value = ef.valueFromDetail(d, s, e);
       return {
-        value, when: ef.toEventInput(value, value).when, browserReading: ef.dateOf(s),
+        value, when: ef.toEventInput(value, value, Intl.DateTimeFormat().resolvedOptions().timeZone).when, browserReading: ef.dateOf(s),
       };
     }, [master, chipStart, chipEnd] as [typeof master, number, number]);
   };
@@ -1642,7 +1647,7 @@ test.describe('the anchor’s precision', () => {
 
   test('a start with seconds on it keeps them', () => {
     const value = valueFromDetail(timedDetail(startMs, endMs), startMs, endMs);
-    const sent = toEventInput(value, value);
+    const sent = toEventInput(value, value, TZ);
 
     // `when` is a union, so the timed arm has to be established before its
     // fields can be read — which is the point of the union and worth spelling
@@ -1663,7 +1668,7 @@ test.describe('the anchor’s precision', () => {
   test('a start the user did edit loses the seconds the form cannot express', () => {
     const initial = valueFromDetail(timedDetail(startMs, endMs), startMs, endMs);
     const value = { ...initial, start: '10:00' };
-    const sent = toEventInput(value, initial);
+    const sent = toEventInput(value, initial, TZ);
 
     expect(sent.when.kind).toBe('timed');
     if (sent.when.kind !== 'timed') throw new Error('not a timed event');
@@ -2350,18 +2355,18 @@ test.describe('what a save sends about guests', () => {
    */
   test('a save that left the guest list alone sends no guests', () => {
     const value = initial();
-    expect(toEventInput(value, initial()).guests).toBeUndefined();
+    expect(toEventInput(value, initial(), TZ).guests).toBeUndefined();
 
     // The drag's own shape: the same value with the times moved.
     const moved = { ...value, start: '10:00', end: '10:30', sourceStartMs: null, sourceEndMs: null };
-    expect(toEventInput(moved, initial()).guests).toBeUndefined();
+    expect(toEventInput(moved, initial(), TZ).guests).toBeUndefined();
   });
 
   test('a save that changed it sends the whole list', () => {
     const value = initial();
     value.guests = addGuest(value.guests, 'bo@x.com');
 
-    expect(toEventInput(value, initial()).guests).toEqual([
+    expect(toEventInput(value, initial(), TZ).guests).toEqual([
       { email: 'ana@x.com', optional: false },
       { email: 'me@x.com', optional: false },
       { email: 'bo@x.com', optional: false },
@@ -2373,7 +2378,7 @@ test.describe('what a save sends about guests', () => {
   test('removing everyone sends an empty list, not an absent one', () => {
     const value = initial();
     value.guests = [];
-    expect(toEventInput(value, initial()).guests).toEqual([]);
+    expect(toEventInput(value, initial(), TZ).guests).toEqual([]);
   });
 
   test('a create sends the guests it opened with — the paste shape', () => {
@@ -2388,14 +2393,14 @@ test.describe('what a save sends about guests', () => {
     expect(pasted.isEdit).toBe(false);
     // Ana only: the copier's own row is dropped by `pastedValue` — the
     // organizer of the new event is not a guest of it.
-    expect(toEventInput(pasted, pasted).guests).toEqual([
+    expect(toEventInput(pasted, pasted, TZ).guests).toEqual([
       { email: 'ana@x.com', optional: false },
     ]);
 
     // An untouched empty list on a create still sends nothing — absent and
     // "nobody" coincide there, and no key is the smaller payload.
     const blank = blankValueAt(Date.UTC(2026, 8, 10, 9, 0), 1);
-    expect(toEventInput(blank, blank).guests).toBeUndefined();
+    expect(toEventInput(blank, blank, TZ).guests).toBeUndefined();
   });
 });
 
@@ -2437,8 +2442,8 @@ test.describe('video calls in the value and on the wire', () => {
       ...initial,
       videoCall: { provider: 'googleMeet', uri: null, source: 'new' } as const,
     };
-    expect(toEventInput(value, initial).conference).toBe('googleMeet');
-    expect(toEventInput(value, initial).location).toBeNull();
+    expect(toEventInput(value, initial, TZ).conference).toBe('googleMeet');
+    expect(toEventInput(value, initial, TZ).location).toBeNull();
     expect(videoCallProblem(value, 'google')).toBeNull();
     expect(videoCallProblem(value, 'caldav')).toContain('Google calendar');
   });
@@ -2448,10 +2453,10 @@ test.describe('video calls in the value and on the wire', () => {
       ...timedDetail(0, 30 * 60_000),
       conference_uri: 'https://meet.google.com/abc-defg-hij',
     });
-    expect(toEventInput(initial, initial).conference).toBeUndefined();
+    expect(toEventInput(initial, initial, TZ).conference).toBeUndefined();
 
     const removed = { ...initial, videoCall: null };
-    expect(toEventInput(removed, initial).conference).toBe('none');
+    expect(toEventInput(removed, initial, TZ).conference).toBe('none');
   });
 
   test('replacing structured Meet with Zoom removes it and appends the Zoom link once', () => {
@@ -2466,7 +2471,7 @@ test.describe('video calls in the value and on the wire', () => {
         provider: 'zoom', uri: 'https://zoom.us/j/987654321', source: 'new',
       },
     };
-    const sent = toEventInput(value, initial);
+    const sent = toEventInput(value, initial, TZ);
     expect(sent.conference).toBe('none');
     expect(sent.location).toBe('Room 4 · Zoom: https://zoom.us/j/987654321');
     expect(locationForVideoCall(sent.location ?? '', value.videoCall, value.videoCall))
@@ -2481,7 +2486,7 @@ test.describe('video calls in the value and on the wire', () => {
     };
     // Quick add can hand this populated value to Continue editing. On a create
     // there is no server-side before, even though `initial` is the same object.
-    expect(toEventInput(value, value).location).toBe('Zoom: https://zoom.us/j/987654321');
+    expect(toEventInput(value, value, TZ).location).toBe('Zoom: https://zoom.us/j/987654321');
   });
 
   test('validates Zoom links and compares conferencing by meaning, not source', () => {
@@ -2549,7 +2554,7 @@ test.describe('reminders in the value and on the wire', () => {
       use_default: false,
       overrides: [{ method: 'popup', minutes: 10 }],
     });
-    expect('reminders' in toEventInput(opened(d), opened(d))).toBe(false);
+    expect('reminders' in toEventInput(opened(d), opened(d), TZ)).toBe(false);
   });
 
   /** The rows are a set as far as meaning goes: an order Google happens to
@@ -2562,7 +2567,7 @@ test.describe('reminders in the value and on the wire', () => {
     });
     const value = opened(d);
     value.popupReminders = [60, 10];
-    expect('reminders' in toEventInput(value, opened(d))).toBe(false);
+    expect('reminders' in toEventInput(value, opened(d), TZ)).toBe(false);
   });
 
   test('an added row sends the whole object, preserved emails included', () => {
@@ -2572,7 +2577,7 @@ test.describe('reminders in the value and on the wire', () => {
     });
     const value = opened(d);
     value.popupReminders = [...value.popupReminders, 15];
-    expect(toEventInput(value, opened(d)).reminders).toEqual({
+    expect(toEventInput(value, opened(d), TZ).reminders).toEqual({
       useDefault: false,
       overrides: [
         { method: 'popup', minutes: 10 },
@@ -2585,7 +2590,7 @@ test.describe('reminders in the value and on the wire', () => {
   test('a row added on a create sends explicit overrides', () => {
     const initial = blankValueAt(1_785_398_400_000, 1);
     const value = { ...initial, popupReminders: [15] };
-    expect(toEventInput(value, initial).reminders).toEqual({
+    expect(toEventInput(value, initial, TZ).reminders).toEqual({
       useDefault: false,
       overrides: [{ method: 'popup', minutes: 15 }],
     });
@@ -2601,7 +2606,7 @@ test.describe('reminders in the value and on the wire', () => {
     });
     const value = opened(d);
     value.popupReminders = [];
-    expect(toEventInput(value, opened(d)).reminders).toEqual({
+    expect(toEventInput(value, opened(d), TZ).reminders).toEqual({
       useDefault: false,
       overrides: [],
     });

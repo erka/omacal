@@ -6,6 +6,10 @@ fn main() {
     // by exporting TZ, and everything downstream captures the zone at
     // process start. See `apply_display_tz_early`'s own comment.
     omacal_lib::apply_display_tz_early();
+    // Straight after it, while `TZ` is what this process will live with: the
+    // name the UI labels every hour with and stamps on the events it writes.
+    // See `freeze_effective_timezone` for why it is taken once.
+    omacal_lib::freeze_effective_timezone();
     // Same constraint, second variable: GTK reads `GTK_THEME` once, at
     // startup, and inside an AppImage the launch hook has set it to a value
     // that stops the dark hint working. See `apply_gtk_theme_early`.

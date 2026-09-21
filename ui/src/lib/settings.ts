@@ -230,6 +230,13 @@ export type AppSettings = {
    *  why changing it restarts omacal — the JS engine and libc both capture
    *  the zone at process start and offer no runtime swap. */
   displayTimezone: string | null;
+  /** The zone the app is *actually* running in — `displayTimezone` when one
+   *  is set, the machine's otherwise — named by the backend and frozen at
+   *  launch. Every zone name the UI shows, and the `TZID` it writes, comes
+   *  from here rather than from `Intl`, which resolves `Europe/Kyiv` to
+   *  `Europe/Kiev` and so named a zone the picker never offered (#140).
+   *  Read through the `zonename.svelte.ts` rune for `timeFormat`'s reason. */
+  effectiveTimezone: string;
   /** A second zone shown beside times for convenience, or `null` for off.
    *  Display only — every write still happens in the display zone — and read
    *  through the `secondzone.svelte.ts` rune for `timeFormat`'s reason: the

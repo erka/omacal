@@ -667,6 +667,11 @@ type StubSettings = {
   visibleStartHour: number;
   visibleEndHour: number;
   displayTimezone: string | null;
+  /** What the backend names the zone the process runs in. `null` derives it
+   *  the way the real one does — the display zone when one is set, the
+   *  runtime's otherwise — and a spec sets it outright to reproduce a
+   *  webview whose ICU disagrees with the database (#140). */
+  effectiveTimezone: string | null;
   secondTimezone: string | null;
   weatherEnabled: boolean;
   weatherLocation: string | null;
@@ -746,6 +751,7 @@ const DEFAULT_SETTINGS: StubSettings = {
   visibleStartHour: 0,
   visibleEndHour: 24,
   displayTimezone: null,
+  effectiveTimezone: null,
   // Off, the backend's fresh-install default — and what keeps every
   // committed gutter golden describing a 44px ruler with one clock.
   secondTimezone: null,
@@ -773,14 +779,32 @@ const DEFAULT_SETTINGS: StubSettings = {
   windowFrame: 'auto',
 };
 
+/** The backend resolves `effective_timezone` before any settings object
+ *  leaves it, and **every** command that answers with settings carries it —
+ *  not just `get_settings`. Resolving here rather than on the way out is
+ *  what makes that true of the ~20 setters too, each of which returns the
+ *  stored object directly. A spec that stored a name keeps it; otherwise it
+ *  is the display zone, or the runtime's.
+ *
+ *  It does not follow a later `set_display_timezone`, and the real one does
+ *  not either: the zone a process runs in is fixed until it restarts. */
+function resolveZone(s: StubSettings): StubSettings {
+  return {
+    ...s,
+    effectiveTimezone: s.effectiveTimezone
+      ?? s.displayTimezone
+      ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
+  };
+}
+
 function loadSettings(): StubSettings {
   try {
     const raw = sessionStorage.getItem(SETTINGS_KEY);
-    return raw ? { ...DEFAULT_SETTINGS, ...JSON.parse(raw) } : { ...DEFAULT_SETTINGS };
+    return resolveZone(raw ? { ...DEFAULT_SETTINGS, ...JSON.parse(raw) } : { ...DEFAULT_SETTINGS });
   } catch {
     // A storage that refuses to answer leaves the defaults, exactly as an
     // absent row does. Never a throw: this runs during the stub's own install.
-    return { ...DEFAULT_SETTINGS };
+    return resolveZone({ ...DEFAULT_SETTINGS });
   }
 }
 

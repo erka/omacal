@@ -681,6 +681,17 @@ pub struct AppSettings {
     /// the JS engine and libc capture the zone at process start and offer
     /// no runtime swap.
     pub display_timezone: Option<String>,
+    /// The zone the app is **actually** running in — [`Self::display_timezone`]
+    /// when one is set, the machine's otherwise — named by jiff rather than
+    /// by the webview, and frozen at launch (see
+    /// `crate::freeze_effective_timezone`).
+    ///
+    /// It exists because ICU and the IANA database disagree about aliases:
+    /// WebKit resolves `Europe/Kyiv` to `Europe/Kiev`, so a UI that took the
+    /// name from `Intl` labelled the grid with a spelling the picker never
+    /// offered and stamped it on every event it wrote (#140). The picker,
+    /// the validator and this field all answer from the one database.
+    pub effective_timezone: String,
     /// A second zone shown *beside* times for convenience, or `None` for off
     /// — Google Calendar's own feature, for the reader who lives in one zone
     /// and meets in another. Display only, and that is the whole contract:
@@ -844,6 +855,10 @@ pub(crate) async fn read_settings_with(pool: &SqlitePool, baseline: u8) -> AppSe
         display_timezone: read(pool, DISPLAY_TZ_KEY)
             .await
             .filter(|v| !v.trim().is_empty()),
+        // Not read from the row above: "system" is only a name once the
+        // process has resolved it, and a display zone that failed to apply
+        // would otherwise be reported as the zone on screen when it is not.
+        effective_timezone: crate::effective_timezone(),
         // Same convention: "" is the feature off, which is the fresh-install
         // state and not an error.
         second_timezone: read(pool, SECOND_TZ_KEY)
@@ -2996,6 +3011,34 @@ mod tests {
 
         write(&p, DISPLAY_TZ_KEY, "").await.unwrap();
         assert_eq!(read_settings(&p).await.display_timezone, None);
+    }
+
+    /// The effective zone is not the preference: it is reported whether or
+    /// not one is stored, and it is always a name the picker could have
+    /// offered and `set_display_timezone` would accept.
+    ///
+    /// It does **not** pin the spelling, and cannot: jiff answers to
+    /// `Europe/Kiev` as readily as to `Europe/Kyiv`, so both would pass
+    /// here. Which of the two reaches the screen is the webview's disagreement
+    /// with the database, and `ui/tests/timezone-label.spec.ts` is where that
+    /// is held (#140). What this holds is the seam underneath it: one
+    /// database answering the picker, the validator and this field.
+    #[tokio::test]
+    async fn the_effective_zone_is_always_a_name_the_validator_accepts() {
+        let p = pool().await;
+
+        let reported = read_settings(&p).await.effective_timezone;
+        assert!(!reported.is_empty(), "a zone is always named, even as UTC");
+        assert!(
+            jiff::tz::TimeZone::get(&reported).is_ok(),
+            "{reported} is not a zone jiff knows, so the picker never offered it",
+        );
+        assert!(list_timezones().contains(&reported), "{reported} is missing from the picker");
+
+        // A stored display zone does not change the answer — the process is
+        // in the zone it launched in, whatever the row now says.
+        write(&p, DISPLAY_TZ_KEY, "Europe/Sofia").await.unwrap();
+        assert_eq!(read_settings(&p).await.effective_timezone, reported);
     }
 
     /// The sidecar is what `main()` reads before Tauri exists; writing Some

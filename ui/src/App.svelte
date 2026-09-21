@@ -49,6 +49,7 @@
   import { padFor, sliceWeek, visibleIndex, windowHeld } from './lib/weekwindow';
   import { setClockFormat } from './lib/clock.svelte';
   import { setSecondZone } from './lib/secondzone.svelte';
+  import { setZoneName, zoneName } from './lib/zonename.svelte';
   import { setWeekStartDay } from './lib/weekstartstore.svelte';
   import { setTemperatureUnit } from './lib/tempunit.svelte';
   import ShortcutSheet from './lib/ShortcutSheet.svelte';
@@ -805,9 +806,6 @@
    *  backend's fresh-install default while the initial settings read is in
    *  flight. */
   let defaultEventDurationMinutes = $state(60);
-  /** Keep the selected zone's spelling for the header. Its clock is already
-   *  set at process start; changing the preference restarts the app. */
-  let displayTimezone = $state<string | null>(null);
 
   /** Bound into Header so the application-wide preferences chord opens the
    *  same SettingsModal as the menu item. */
@@ -845,11 +843,11 @@
       .then((s) => {
         defaultCalendarId = s.defaultCalendarId;
         defaultEventDurationMinutes = s.defaultEventDurationMinutes;
-        displayTimezone = s.displayTimezone;
         setClockFormat(s.timeFormat);
       setVisibleHoursState(s.visibleStartHour, s.visibleEndHour);
       setDateFormat(s.dateFormat);
         setSecondZone(s.secondTimezone);
+        setZoneName(s.effectiveTimezone);
         setTemperatureUnit(s.temperatureUnit);
         if (appearanceChoices === appearanceBefore) applyAppearance(s);
         if (weekViewChoices === weekBefore) applyWeekSettings(s, false);
@@ -1883,7 +1881,7 @@
         event.id,
         choice.scope,
         event.start_ms,
-        toEventInput(moved, value),
+        toEventInput(moved, value, zoneName()),
         choice.sendUpdates,
       );
     } catch (e) {
@@ -2096,7 +2094,7 @@
     bind:settingsOpen
     {status} {anchorMs} weekStartMs={pannedWeekStartMs} {weekStartsToday} weekDays={weekViewDays}
     yearShown={view === 'bigyear' ? bigYearNum : yearNum}
-    {busy} {error} {calendars} {view} {listMode} {displayTimezone}
+    {busy} {error} {calendars} {view} {listMode}
     onToggleList={toggleList}
     onPrev={() => step(-1)}
     onNext={() => step(1)}
@@ -2115,6 +2113,7 @@
       setVisibleHoursState(s.visibleStartHour, s.visibleEndHour);
       setDateFormat(s.dateFormat);
       setSecondZone(s.secondTimezone);
+      setZoneName(s.effectiveTimezone);
       setTemperatureUnit(s.temperatureUnit);
       weekViewChoices += 1;
       applyWeekSettings(s, true);

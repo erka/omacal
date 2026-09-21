@@ -3,6 +3,7 @@
   import { visibleHours } from "./visiblehours.svelte";
   import { clockFormat } from './clock.svelte';
   import { gutterWidth, secondZone } from './secondzone.svelte';
+  import { zoneName } from './zonename.svelte';
   import { temperatureUnit } from './tempunit.svelte';
   import { formatTemp } from './temperature';
   import WeatherGlyph from './WeatherGlyph.svelte';
@@ -222,7 +223,9 @@
   // The zone this grid is laid out in — the process's own, which is the
   // display zone when one is set. Named only when a second clock appears:
   // one clock needs no label, two clocks unlabelled are a guessing game.
-  const primaryZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  // Taken from the backend rather than `Intl`, so the lane and the header
+  // cannot spell the same zone two ways (`zonename.svelte.ts`, #140).
+  const primaryZone = $derived(zoneName());
 
   // Current-time line, recomputed each minute. Held as an instant and divided by
   // the column it lands in, rather than assuming a 1440-minute day.

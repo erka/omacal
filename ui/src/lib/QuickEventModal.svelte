@@ -5,6 +5,7 @@
   import type { Calendar } from './calendars';
   import { escapeCloses } from './dismiss.svelte';
   import { toEventInput, type EventFormResult, type EventFormValue } from './eventform';
+  import { zoneName } from './zonename.svelte';
   import {
     parseQuickEvent, quickPreviewRows, QUICK_EVENT_EXAMPLES,
   } from './quickevent';
@@ -46,7 +47,7 @@
     oncreate({
       calendarId: parsed.value.calendarId,
       scope: 'this',
-      fields: toEventInput(parsed.value, parsed.baseline),
+      fields: toEventInput(parsed.value, parsed.baseline, zoneName()),
       // Typing an address is an explicit invitation, and the button names the
       // mail effect before it is pressed. Continue editing takes the existing
       // form path when somebody wants the send/don't-send choice instead.
