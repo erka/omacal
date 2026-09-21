@@ -693,7 +693,7 @@ const SETTINGS_KEY = 'omacal-stub-settings';
 
 /** What `list_timezones` answers and `set_second_timezone` validates
  *  against — one list, so the stub cannot offer a zone it then refuses. */
-const STUB_TIMEZONES = ['Asia/Kolkata', 'Europe/Sofia', 'UTC'];
+const STUB_TIMEZONES = ['Asia/Kolkata', 'Europe/Kyiv', 'Europe/Sofia', 'UTC'];
 
 const DEFAULT_SETTINGS: StubSettings = {
   syncIntervalMs: 5 * 60_000,
