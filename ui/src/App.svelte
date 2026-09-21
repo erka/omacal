@@ -805,6 +805,9 @@
    *  backend's fresh-install default while the initial settings read is in
    *  flight. */
   let defaultEventDurationMinutes = $state(60);
+  /** Keep the selected zone's spelling for the header. Its clock is already
+   *  set at process start; changing the preference restarts the app. */
+  let displayTimezone = $state<string | null>(null);
 
   /** Bound into Header so the application-wide preferences chord opens the
    *  same SettingsModal as the menu item. */
@@ -842,6 +845,7 @@
       .then((s) => {
         defaultCalendarId = s.defaultCalendarId;
         defaultEventDurationMinutes = s.defaultEventDurationMinutes;
+        displayTimezone = s.displayTimezone;
         setClockFormat(s.timeFormat);
       setVisibleHoursState(s.visibleStartHour, s.visibleEndHour);
       setDateFormat(s.dateFormat);
@@ -2092,7 +2096,7 @@
     bind:settingsOpen
     {status} {anchorMs} weekStartMs={pannedWeekStartMs} {weekStartsToday} weekDays={weekViewDays}
     yearShown={view === 'bigyear' ? bigYearNum : yearNum}
-    {busy} {error} {calendars} {view} {listMode}
+    {busy} {error} {calendars} {view} {listMode} {displayTimezone}
     onToggleList={toggleList}
     onPrev={() => step(-1)}
     onNext={() => step(1)}
